@@ -14,6 +14,7 @@ for f in "$ROOT"/docs/*.md; do
   # Wiki links have no .md extension; repo-relative links need full GitHub URLs.
   sed -e 's/(\([A-Za-z0-9_-]*\)\.md)/(\1)/g' \
       -e "s#(\.\./\([^)]*\))#(https://github.com/${REPO}/blob/main/\1)#g" \
+      -e "s#(images/\([^)]*\))#(https://raw.githubusercontent.com/${REPO}/main/docs/images/\1)#g" \
       "$f" > "$WORK/wiki/$(basename "$f")"
 done
 
