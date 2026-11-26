@@ -56,9 +56,16 @@ First real test against Groq: routing, caching and cost tracking all worked, and
 - **Demo traffic generator:** free simulated mode with failover and budget scenarios, or real traffic through Groq
 - 54 tests (96% coverage); test reports on every CI run; live test now checks streaming, tracing and reasoning savings
 
+### v0.5.1
+
+- Redesigned spend chart: real time axis, time slots that adapt to how much history exists, hover details
+- New efficiency metrics: projected monthly spend, cost per 1,000 tokens, strong-model share, cache hit rate by feature; three new Grafana panels
+- Prometheus counters now start from the stored history, so Grafana keeps its data across restarts
+- Demo traffic covers 13 teams
+
 ## Quality bar
 
-- 54 automated tests (security, routing, reasoning control, budgets, failover, streaming, tracing, metrics, upgrades); 96% coverage
+- 55 automated tests (security, routing, reasoning control, budgets, failover, streaming, tracing, metrics, upgrades); 96% coverage
 - Lint, type checks, dependency audit and static security scan on every pull request
 - Live test against the real provider on every merge to `main`
 - End-to-end test with every protection enabled, probing the gateway as an attacker would

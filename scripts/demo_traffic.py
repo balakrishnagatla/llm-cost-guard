@@ -39,8 +39,18 @@ SCENARIOS = [
                              "Explain why this SQL query is slow and suggest an index."]),
     ("marketing", "copy", ["Write a tagline for a budgeting app.", "Write a subject line for a spring sale.",
                            "Write a tweet about our new dashboard.", "Write a short product description for a mug."]),
+    ("sales", "email", ["Draft a two-line follow-up email after a demo call.",
+                        "Write a polite reminder about an unsigned quote."]),
+    ("finance", "forecast", ["Analyze next quarter's cash flow step by step: revenue $1.2M, costs up 8%.",
+                             "Explain why gross margin dropped 3 points this quarter."]),
+    ("legal", "review", ["Analyze this clause for risks step by step: 'Either party may terminate at any time.'"]),
+    ("hr", "policy", ["How many vacation days do new employees get?", "What is the parental leave policy?"]),
+    ("product", "feedback", ["Summarize this feedback: 'Love the app, but exports are slow and search is confusing.'",
+                             "Tag this feedback by theme: 'Pricing page is unclear.'"]),
+    ("data", "sql", ["Debug this SQL: SELECT * FROM orders WHERE created_at > NOW() GROUP BY customer_id",
+                     "Write a SQL query for monthly active users."]),
 ]
-WEIGHTS = [5, 2, 3, 1, 2, 2, 3]  # how often each scenario appears
+WEIGHTS = [5, 2, 3, 1, 2, 2, 3, 2, 2, 1, 2, 2, 2]  # how often each scenario appears
 BUDGETS = "marketing:0.0004"  # small on purpose: the pre-call estimate starts refusing calls after a few
 
 
@@ -161,7 +171,7 @@ def send(client: httpx.Client, url: str, call: dict) -> tuple[int, dict]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=["fake", "real"], default="fake")
-    ap.add_argument("--calls", type=int, help="number of calls (default 80 fake, 24 real)")
+    ap.add_argument("--calls", type=int, help="number of calls (default 80 fake, 40 real)")
     ap.add_argument("--gateway", default="http://localhost:8080", help="real mode: your running gateway")
     ap.add_argument("--port", type=int, default=8090, help="fake mode: port for the demo gateway")
     ap.add_argument("--exit", action="store_true", help="fake mode: stop the demo gateway when done")
@@ -172,7 +182,7 @@ def main() -> int:
         proc, url = start_fake_stack(args.port, args.port + 1)
         n, pause = args.calls or 80, 0.0
     else:
-        url, n, pause = args.gateway.rstrip("/"), args.calls or 24, 2.1  # stay under Groq's free 30 requests/min
+        url, n, pause = args.gateway.rstrip("/"), args.calls or 40, 2.1  # stay under Groq's free 30 requests/min
 
     counts: dict[str, int] = {}
     with httpx.Client(timeout=120) as client:

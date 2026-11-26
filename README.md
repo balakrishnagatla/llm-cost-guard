@@ -131,7 +131,7 @@ pip install -r requirements-dev.txt
 ruff check app tests scripts && mypy app && pytest --cov
 ```
 
-Every pull request runs lint, type checks, 54 tests (85% coverage minimum, currently 96%) with a test report in the job summary, `pip-audit`, `bandit` and a Docker build. A separate [live smoke test](.github/workflows/live-smoke.yml) runs the gateway against the real Groq API on every push to `main` and weekly, using a key stored as a GitHub **environment secret** (never exposed to pull requests). It checks routing, caching, streaming, tracing and that reasoning control keeps simple answers short.
+Every pull request runs lint, type checks, 55 tests (85% coverage minimum, currently 96%) with a test report in the job summary, `pip-audit`, `bandit` and a Docker build. A separate [live smoke test](.github/workflows/live-smoke.yml) runs the gateway against the real Groq API on every push to `main` and weekly, using a key stored as a GitHub **environment secret** (never exposed to pull requests). It checks routing, caching, streaming, tracing and that reasoning control keeps simple answers short.
 
 ## Security
 

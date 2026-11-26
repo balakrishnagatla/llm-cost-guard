@@ -62,7 +62,7 @@ def test_demo_traffic_plan_is_varied_and_reproducible():
 
     calls = plan(80)
     assert calls == plan(80)  # same seed, same traffic
-    assert len({c["team"] for c in calls}) >= 5
+    assert len({c["team"] for c in calls}) >= 10
     assert any(c["stream"] for c in calls)
     prompts = [c["prompt"] for c in calls]
     assert len(set(prompts)) < len(prompts)  # some repeats, for cache hits

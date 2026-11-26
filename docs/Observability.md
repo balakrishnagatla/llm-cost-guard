@@ -13,7 +13,9 @@ LLM Cost Guard gives you three views of what's happening, from simplest to most 
 No setup needed. Besides spend by team, feature and model, it shows:
 
 - **Savings rate:** the share of spend avoided by the cache and routing
-- **Spend over 24 hours,** hour by hour, with savings stacked on top
+- **Spend over time,** with savings stacked on top. The time scale adapts to your history: 30-second slots for a brand-new install, up to hourly slots over 24 hours
+- **Efficiency:** projected monthly spend (at the current run-rate), cost per 1,000 tokens, share of calls sent to the strong model, average cost per call
+- **Cache hit rate by feature:** which features benefit from caching
 - **Most expensive calls,** and **average cost per call by feature**
 - **Reasoning share of output by model:** how much you pay for hidden thinking
 - **Latency by upstream** (p50 and p95)
@@ -44,7 +46,9 @@ Start the gateway with the observability stack:
 docker compose --profile observability up -d --build
 ```
 
-- **Grafana:** http://localhost:3000 opens straight to the *LLM Cost Guard* dashboard: spend and savings, savings rate, cache hit rate, spend per hour by team, calls by model, reasoning share, p95 latency, upstream errors, budget refusals and budget remaining.
+- **Grafana:** http://localhost:3000 opens straight to the *LLM Cost Guard* dashboard (14 panels): spend and savings, savings rate, cache hit rate, spend per hour by team, calls by model, reasoning share, p95 latency, upstream errors, budget refusals, budget remaining, projected monthly spend and spend by feature.
+
+Counters start from the totals already in the database, so a restart doesn't wipe Grafana's history. Panels fill in as traffic flows; send some with `python scripts/demo_traffic.py --mode real`.
 - **Prometheus:** http://localhost:9090 for ad-hoc queries.
 
 Metrics exposed at `/metrics`:

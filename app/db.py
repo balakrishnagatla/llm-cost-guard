@@ -200,9 +200,9 @@ def insights(hours: int = 24) -> dict:
     since = time.time() - hours * 3600
     with _lock:
         rows = [dict(r) for r in _db().execute(
-            "SELECT ts, request_id, team, feature, model, upstream, status, cost_usd, saved_usd, "
-            "routing_saved_usd, output_tokens, reasoning_tokens, latency_ms, cache_hit FROM calls WHERE ts >= ?",
-            (since,)).fetchall()]
+            "SELECT ts, request_id, team, feature, model, upstream, status, cost_usd, saved_usd, routing_saved_usd, "
+            "input_tokens, output_tokens, reasoning_tokens, latency_ms, cache_hit, requested_model "
+            "FROM calls WHERE ts >= ?", (since,)).fetchall()]
 
     served = [r for r in rows if r["upstream"] != "blocked"]
     spend = sum(r["cost_usd"] for r in served)
@@ -219,13 +219,17 @@ def insights(hours: int = 24) -> dict:
             t[1] += r["reasoning_tokens"]
             latency.setdefault(r["upstream"], []).append(r["latency_ms"])
 
-    hourly: dict[int, dict] = {}
+    timeline = _timeline(served, now=time.time(), hours=hours)
+    routed = [r for r in served if r["requested_model"] == "auto" and r["status"] == 200 and not r["cache_hit"]]
+    strong = sum(1 for r in routed if _is_strong(r["model"]))
+    tokens = sum(r["input_tokens"] + r["output_tokens"] for r in served if not r["cache_hit"])
+    cache_by_feature: dict[str, list[int]] = {}
     for r in served:
-        h = int(r["ts"] // 3600 * 3600)
-        b = hourly.setdefault(h, {"hour": h, "calls": 0, "cost_usd": 0.0, "saved_usd": 0.0})
-        b["calls"] += 1
-        b["cost_usd"] += r["cost_usd"]
-        b["saved_usd"] += r["saved_usd"] + r["routing_saved_usd"]
+        c = cache_by_feature.setdefault(r["feature"], [0, 0])
+        c[0] += 1
+        c[1] += r["cache_hit"]
+    first_ts = min((r["ts"] for r in served), default=None)
+    elapsed_h = max((time.time() - first_ts) / 3600, 1.0) if first_ts else 1.0
 
     top = sorted((r for r in served if r["cost_usd"] > 0), key=lambda r: r["cost_usd"], reverse=True)[:5]
     return {
@@ -245,6 +249,56 @@ def insights(hours: int = 24) -> dict:
         "latency_by_upstream": [
             {"upstream": u, "calls": len(v), "p50_ms": _percentile(v, 50), "p95_ms": _percentile(v, 95)}
             for u, v in sorted(latency.items())],
-        "hourly": [{**b, "cost_usd": round(b["cost_usd"], 8), "saved_usd": round(b["saved_usd"], 8)}
-                   for _, b in sorted(hourly.items())],
+        "timeline": timeline,
+        # Run-rate: spend so far in the window, scaled to 30 days (at least one hour of data assumed)
+        "projected_monthly_usd": round(spend / elapsed_h * 24 * 30, 6),
+        "strong_model_share": round(strong / len(routed), 4) if routed else 0.0,
+        "cost_per_1k_tokens_usd": round(spend / tokens * 1000, 8) if tokens else 0.0,
+        "cache_hit_rate_by_feature": sorted(
+            ({"feature": f, "calls": n, "hit_rate": round(h / n, 4)} for f, (n, h) in cache_by_feature.items()),
+            key=lambda x: x["hit_rate"], reverse=True),
     }
+
+
+def _is_strong(model: str) -> bool:
+    """Is this the strong tier of any provider in routing.json?"""
+    from .router import load_config  # local import: router has no db dependency
+    return any(model == p.get("strong") for p in load_config().get("providers", {}).values())
+
+
+def _timeline(rows: list[dict], now: float, hours: int) -> dict:
+    """Spend and savings in evenly spaced buckets. The bucket size adapts to how much history exists,
+    so a fresh install shows 5-minute detail instead of one giant hourly bar."""
+    first = min((r["ts"] for r in rows), default=now)
+    span = now - first
+    # (history up to, bucket size, window shown): use the first that fits
+    scales = ((900, 30, 900), (3600, 60, 3600), (3 * 3600, 300, 3 * 3600),
+              (12 * 3600, 900, 12 * 3600), (float("inf"), 3600, hours * 3600))
+    bucket, window = next((b, w) for limit, b, w in scales if span <= limit)
+    start = int((now - window) // bucket * bucket) + bucket
+    buckets = {t: {"t": t, "calls": 0, "cost_usd": 0.0, "saved_usd": 0.0}
+               for t in range(start, int(now) + 1, bucket)}
+    for r in rows:
+        t = int(r["ts"] // bucket * bucket)
+        if t in buckets:
+            b = buckets[t]
+            b["calls"] += 1
+            b["cost_usd"] += r["cost_usd"]
+            b["saved_usd"] += r["saved_usd"] + r["routing_saved_usd"]
+    return {"bucket_seconds": bucket, "points": [
+        {**b, "cost_usd": round(b["cost_usd"], 8), "saved_usd": round(b["saved_usd"], 8)}
+        for _, b in sorted(buckets.items())]}
+
+
+def totals_for_metrics() -> list[dict]:
+    """All-time aggregates used to seed Prometheus counters at startup, so they survive restarts."""
+    with _lock:
+        rows = _db().execute(
+            """SELECT team, feature, model, upstream, status, cache_hit, COUNT(*) AS calls,
+                      SUM(cost_usd) AS cost_usd, SUM(saved_usd) AS saved_usd,
+                      SUM(routing_saved_usd) AS routing_saved_usd,
+                      SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                      SUM(reasoning_tokens) AS reasoning_tokens
+               FROM calls GROUP BY team, feature, model, upstream, status, cache_hit"""
+        ).fetchall()
+    return [dict(r) for r in rows]
