@@ -22,6 +22,10 @@ No setup needed. Besides spend by team, feature and model, it shows:
 - **Blocked by budget** and **errors** counters
 - **Recent calls:** click any row to see its trace
 
+![Dashboard](images/dashboard.png)
+
+![Insights](images/dashboard-insights.png)
+
 ### Traces
 
 Every call gets a request ID, returned in the `x-request-id` header, and a trace of each step it went through:
@@ -38,6 +42,8 @@ Every call gets a request ID, returned in the `x-request-id` header, and a trace
 
 Look up any call with `GET /calls/<request-id>`, or list recent ones with `GET /calls?limit=50`.
 
+![Recent calls and a trace](images/dashboard-trace.png)
+
 ## 2. Prometheus + Grafana
 
 Start the gateway with the observability stack:
@@ -47,6 +53,8 @@ docker compose --profile observability up -d --build
 ```
 
 - **Grafana:** http://localhost:3000 opens straight to the *LLM Cost Guard* dashboard (14 panels): spend and savings, savings rate, cache hit rate, spend per hour by team, calls by model, reasoning share, p95 latency, upstream errors, budget refusals, budget remaining, projected monthly spend and spend by feature.
+
+![Grafana](images/grafana.png)
 
 Counters start from the totals already in the database, so a restart doesn't wipe Grafana's history. Panels fill in as traffic flows; send some with `python scripts/demo_traffic.py --mode real`.
 - **Prometheus:** http://localhost:9090 for ad-hoc queries.
@@ -80,6 +88,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile observab
 ```
 
 Open Jaeger at http://localhost:16686 and pick the `llm-cost-guard` service. Each call is an `llm.request` span with a child span per step (auth, route, budget, cache, each upstream attempt, result). Spans use the OpenTelemetry **GenAI** attribute names (`gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`), plus `costguard.*` attributes for team, feature, cost and savings, so they fit alongside traces from the rest of your system. Any OTLP-compatible backend works (Grafana Tempo, Honeycomb, Datadog and others).
+
+![Jaeger trace](images/jaeger-trace.png)
 
 Export is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 

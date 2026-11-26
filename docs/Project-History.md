@@ -62,6 +62,7 @@ First real test against Groq: routing, caching and cost tracking all worked, and
 - New efficiency metrics: projected monthly spend, cost per 1,000 tokens, strong-model share, cache hit rate by feature; three new Grafana panels
 - Prometheus counters now start from the stored history, so Grafana keeps its data across restarts
 - Demo traffic covers 13 teams
+- Real-traffic results (88 calls, 12 teams) and screenshots of the dashboard, Grafana and Jaeger in the docs
 
 ## Quality bar
 

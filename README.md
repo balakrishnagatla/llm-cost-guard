@@ -23,6 +23,12 @@ your app ──► LLM Cost Guard ──► Groq / OpenAI / Anthropic / Gemini /
 
 ![Dashboard](docs/images/dashboard.png)
 
+<table><tr>
+<td><a href="docs/images/dashboard-trace.png"><img src="docs/images/dashboard-trace.png" alt="Recent calls and a call's trace"></a><br><sub>Recent calls and a call's trace</sub></td>
+<td><a href="docs/images/grafana.png"><img src="docs/images/grafana.png" alt="Grafana dashboard"></a><br><sub>Grafana</sub></td>
+<td><a href="docs/images/jaeger-trace.png"><img src="docs/images/jaeger-trace.png" alt="Jaeger trace"></a><br><sub>Jaeger (OpenTelemetry)</sub></td>
+</tr></table>
+
 📖 **Docs:** [the problem](docs/The-Problem.md) · [how it works](docs/How-It-Works.md) · [results](docs/Results.md) · [observability](docs/Observability.md) · [security](docs/Security.md) · [getting started](docs/Getting-Started.md) · [roadmap](docs/Roadmap.md) · also on the [wiki](https://github.com/balakrishnagatla/llm-cost-guard/wiki)
 
 ## Quick start (free, with Groq)
@@ -77,7 +83,7 @@ client = OpenAI(base_url="http://localhost:8080/openai/v1",
 | **Metrics & traces export** | `/metrics` for Prometheus, ready-made Grafana dashboard, OpenTelemetry spans to Jaeger or any OTLP backend |
 | **Security** | Per-team keys, dashboard login, input limits, security headers, hardened non-root container, localhost-only by default |
 
-Why these levers? In a real test, **over 99% of a call's cost was the model's hidden reasoning output** (83 tokens in, 3,072 out). See [Results](docs/Results.md).
+Why these levers? In a real test, **over 99% of a call's cost was the model's hidden reasoning output** (83 tokens in, 3,072 out). Turning on reasoning control cut a simple prompt's output by **72%**. Across 88 real calls from 12 teams, the cache and routing avoided **34% of spend**. See [Results](docs/Results.md).
 
 ## See it with demo data
 
