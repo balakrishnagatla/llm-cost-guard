@@ -9,7 +9,8 @@ The gateway holds provider API keys and sees every prompt, so it's treated as se
 | Someone uses the gateway to spend your API key | Per-team proxy keys (`COST_GUARD_KEYS`), compared in constant time |
 | A team bills its usage to another team | Team is taken from the key, never from a header |
 | A leaked key or runaway loop runs up a huge bill | Daily budgets per team (`BUDGETS`), HTTP 429 when reached |
-| One user receives another user's cached answer | Cache entries are scoped to a hash of the upstream API key |
+| One user receives another user's cached answer | Cache entries are scoped to a salted PBKDF2 fingerprint of the upstream API key |
+| A copied database reveals API keys | The cache never stores keys; the fingerprint uses PBKDF2-HMAC-SHA256 with a random per-install salt (`data/fingerprint.salt`, mode 0600), so it can't be used to test key guesses offline |
 | Script injection through team/feature names (XSS) | Names are validated before storage and escaped in the dashboard |
 | Anyone reads spend data | Dashboard and `/stats` require a password (`DASHBOARD_PASSWORD`) |
 | Huge requests exhaust memory | Bodies over `MAX_BODY_BYTES` are refused (413) |
