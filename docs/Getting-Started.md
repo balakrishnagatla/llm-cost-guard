@@ -10,18 +10,13 @@ cd llm-cost-guard
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` and add your key:
 
 ```
-OPENAI_BASE_URL=https://api.groq.com/openai/v1
 OPENAI_API_KEY=your_groq_key
 ```
 
-Set the Groq models in `routing.json`:
-
-```json
-"openai": { "cheap": "openai/gpt-oss-20b", "strong": "openai/gpt-oss-120b" }
-```
+The defaults already point at Groq (`OPENAI_BASE_URL`) and its free models (`openai/gpt-oss-20b` cheap, `openai/gpt-oss-120b` strong in `routing.json`). For OpenAI or another provider, change `OPENAI_BASE_URL` and the model IDs.
 
 ## 2. Start it
 
@@ -70,4 +65,8 @@ Callers then send `X-Cost-Guard-Key` instead of `X-Team`.
 cd llm-cost-guard && git pull && docker compose up -d --build
 ```
 
-If the dashboard reports "unable to open database file" after upgrading from v0.2, run `chmod 777 data` once.
+Since v0.4, data is kept in a Docker named volume (`costguard-data`), so there are no folder permission issues on Linux. Data in the old `./data` folder isn't carried over.
+
+## 5. Optional: failover
+
+Add a backup provider so calls keep working when Groq rate-limits you. Get a free Gemini key at aistudio.google.com, set `GEMINI_API_KEY` in `.env`, and copy the `_fallbacks_example` block in `routing.json` into `fallbacks`.

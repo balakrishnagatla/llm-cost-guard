@@ -16,6 +16,7 @@ The gateway holds provider API keys and sees every prompt, so it's treated as se
 | Clickjacking, content sniffing | CSP with `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `nosniff` |
 | Accidental exposure on a network | Docker binds to `127.0.0.1` only; API docs endpoints are disabled |
 | Container breakout impact | Non-root user, all Linux capabilities dropped, `no-new-privileges` |
+| Backup provider keys leaking to callers | Failover keys are read server-side from the environment and never returned |
 
 ## Repository protections
 
@@ -24,6 +25,8 @@ The gateway holds provider API keys and sees every prompt, so it's treated as se
 - Dependabot keeps Python packages, the Docker base image and GitHub Actions up to date.
 - Secret scanning with push protection blocks commits that contain API keys.
 - Vulnerabilities can be reported privately; see [SECURITY.md](../SECURITY.md).
+- The live smoke test uses a Groq key stored as a secret in the `live` **GitHub environment**. Environment secrets are encrypted, masked in logs and only available to jobs that name the environment; the workflow never runs on pull requests, so untrusted code can't read the key.
+- Lint (`ruff`, including security rules), type checks (`mypy`) and an 85% coverage floor run on every pull request.
 
 ## Running it safely
 

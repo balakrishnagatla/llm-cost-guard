@@ -18,7 +18,12 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements-dev.txt
-      - run: pytest -q
+      - name: Lint
+        run: ruff check app tests scripts
+      - name: Type check
+        run: mypy app
+      - name: Tests with coverage (fails under 85%)
+        run: pytest -q --cov --cov-report=term-missing
 
   security:
     runs-on: ubuntu-latest

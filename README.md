@@ -1,64 +1,58 @@
 # LLM Cost Guard
 
-A small proxy that sits between your app and LLM APIs. It **tracks what every call costs, by team and feature**, **caches repeat calls** so you don't pay twice for the same answer, and **routes simple prompts to cheaper models**.
+[![CI](https://github.com/balakrishnagatla/llm-cost-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/balakrishnagatla/llm-cost-guard/actions/workflows/ci.yml)
+[![Live smoke test](https://github.com/balakrishnagatla/llm-cost-guard/actions/workflows/live-smoke.yml/badge.svg)](https://github.com/balakrishnagatla/llm-cost-guard/actions/workflows/live-smoke.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
+![Coverage ≥ 85%](https://img.shields.io/badge/coverage-%E2%89%A585%25-brightgreen.svg)
+
+**A drop-in gateway that shows what every LLM call costs, and cuts that cost automatically.**
+
+Point your app at LLM Cost Guard instead of the AI provider. It measures every call by team, feature and model, and applies four savings levers: **caching**, **model routing**, **reasoning control** and **budgets**, with **failover** to a backup provider when one is rate-limited.
 
 ```
-your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini / Ollama
+your app ──► LLM Cost Guard ──► Groq / OpenAI / Anthropic / Gemini / Ollama
                  │
-                 ├─ logs tokens, cost, latency per team & feature
-                 ├─ serves repeat calls from cache ($0)
-                 ├─ routes simple prompts to a cheaper model
-                 └─ dashboard at http://localhost:8080
+                 ├─ measures tokens (incl. reasoning), cost and latency per team & feature
+                 ├─ answers repeat questions from cache ($0)
+                 ├─ routes simple prompts to a cheap model with low reasoning effort
+                 ├─ refuses calls that would push a team over its daily budget
+                 └─ fails over to a backup provider on rate limits and outages
 ```
 
-**📖 Full documentation: [docs/Home.md](docs/Home.md)** (the problem, how it works, test results, security, roadmap). Also published to the [project wiki](https://github.com/balakrishnagatla/llm-cost-guard/wiki).
+![Dashboard](docs/images/dashboard.png)
 
-## Features (v0.3)
+📖 **Docs:** [the problem](docs/The-Problem.md) · [how it works](docs/How-It-Works.md) · [results](docs/Results.md) · [security](docs/Security.md) · [getting started](docs/Getting-Started.md) · [roadmap](docs/Roadmap.md) · also on the [wiki](https://github.com/balakrishnagatla/llm-cost-guard/wiki)
 
-- OpenAI-compatible endpoint (works with OpenAI, Groq, Gemini, OpenRouter, Ollama and other compatible APIs) and the Anthropic Messages API
-- Cost per call from an editable `pricing.json`
-- Tag calls with `X-Team` and `X-Feature` headers to see spend per team and feature
-- Response cache (by default only `temperature: 0` calls, which are safe to reuse)
-- Model routing with `"model": "auto"`: simple prompts go to a cheap model, complex ones to a strong model
-- Streaming (`"stream": true`) for both APIs, with token usage captured and priced
-- **Per-team daily budgets**: calls get HTTP 429 once a team hits its limit
-- **Security built in**: per-team proxy keys, dashboard login, per-key cache isolation, localhost-only by default (see [Security](#security))
-- Live dashboard with spend, cache savings, hit rate and latency
-- `/stats` JSON endpoint for your own reporting
-
-## Quick start
+## Quick start (free, with Groq)
 
 ```bash
 git clone https://github.com/balakrishnagatla/llm-cost-guard.git
 cd llm-cost-guard
-cp .env.example .env        # add your API key
-docker compose up --build
+cp .env.example .env          # add your free key from console.groq.com/keys as OPENAI_API_KEY
+docker compose up -d --build
 ```
 
-Or without Docker:
+Dashboard: http://localhost:8080. Defaults already target Groq's free `openai/gpt-oss-20b` (cheap) and `openai/gpt-oss-120b` (strong).
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --port 8080
+curl -i http://localhost:8080/openai/v1/chat/completions \
+  -H "Content-Type: application/json" -H "X-Team: demo" -H "X-Feature: greeting" \
+  -d '{"model":"auto","temperature":0,"messages":[{"role":"user","content":"Say hello"}]}'
 ```
 
-Open http://localhost:8080 for the dashboard.
+Each response tells you what happened:
 
-## Make a call through the proxy
-
-```bash
-curl http://localhost:8080/openai/v1/chat/completions \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "X-Team: search" -H "X-Feature: summarize" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4o-mini", "temperature": 0,
-       "messages": [{"role": "user", "content": "Say hello"}]}'
+```
+x-cost-guard-model: openai/gpt-oss-20b        # chosen by routing
+x-cost-guard-route-reason: short, simple prompt
+x-cost-guard-cache: miss                      # "hit" on the repeat, at $0
+x-cost-guard-upstream: primary                # or the backup provider's name
+x-cost-guard-estimate-usd: 0.000307           # pre-call estimate used for budgets
+x-cost-guard-cost-usd: 0.000074               # actual cost
 ```
 
-Run it twice: the second response has `x-cost-guard-cache: hit` and costs $0.
-
-With the OpenAI Python SDK, just change the base URL:
+With the OpenAI SDK, change only the base URL:
 
 ```python
 from openai import OpenAI
@@ -66,115 +60,63 @@ client = OpenAI(base_url="http://localhost:8080/openai/v1",
                 default_headers={"X-Team": "search", "X-Feature": "summarize"})
 ```
 
-Anthropic: `POST http://localhost:8080/anthropic/v1/messages` with your usual `x-api-key` header.
+## Features
 
-## Model routing
-
-Send `"model": "auto"` and the proxy picks the model for you, using the rules in `routing.json`:
-
-- **Strong model** if the request uses tools, the prompt is longer than `max_cheap_prompt_chars`, or the last user message contains a keyword like "debug", "analyze" or "step by step"
-- **Cheap model** otherwise
-
-Requests that name a model are never rerouted. Each response tells you what happened:
-
-```
-x-cost-guard-model: gpt-4o-mini
-x-cost-guard-route-reason: short, simple prompt
-```
-
-The dashboard shows **Saved by routing (est.)**: what the same tokens would have cost on the strong model minus what they cost on the cheap one. It's an estimate, since different models use slightly different token counts.
-
-For Groq, set the models in `routing.json` to Groq model IDs, for example:
-
-```json
-"openai": { "cheap": "openai/gpt-oss-20b", "strong": "openai/gpt-oss-120b" }
-```
-
-(Groq's model list changes, so check console.groq.com/docs/models.)
-
-## Streaming
-
-Send `"stream": true` as usual. Chunks are passed straight through, and the proxy reads token usage from the stream to price the call. For OpenAI-compatible APIs it adds `stream_options.include_usage` automatically. Streamed calls are not cached.
-
-## Use a free API for testing
-
-Set `OPENAI_BASE_URL` in `.env` to any OpenAI-compatible provider:
-
-| Provider | `OPENAI_BASE_URL` | Get a key |
-|---|---|---|
-| Groq | `https://api.groq.com/openai/v1` | console.groq.com/keys |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | aistudio.google.com |
-| OpenRouter (`:free` models) | `https://openrouter.ai/api/v1` | openrouter.ai/keys |
-| Ollama (local, no key) | `http://host.docker.internal:11434/v1` | ollama.com |
-
-Free models cost $0, so to show realistic numbers in a demo, add the model to `pricing.json` with the price of the paid model it would replace.
-
-## Security
-
-LLM Cost Guard holds your provider API keys, so treat it like any other gateway.
-
-| Protection | How |
+| | |
 |---|---|
-| **Per-team proxy keys** | Set `COST_GUARD_KEYS=search:k_...,support:k_...`. Callers must send `X-Cost-Guard-Key`, and the team is taken from the key, so nobody can bill another team by faking `X-Team`. |
-| **Dashboard login** | Set `DASHBOARD_PASSWORD` to protect the dashboard and `/stats` (HTTP Basic auth). |
-| **Budgets** | `BUDGETS=search:5,support:2.50` caps daily spend per team (resets 00:00 UTC). The check runs before each call, so a team can go over by at most one call. Limits the damage from a leaked key or a runaway loop. |
-| **Cache isolation** | Cached answers are scoped to the upstream API key, so one user never gets another's response. |
-| **Localhost only** | `docker-compose.yml` binds to `127.0.0.1`. Expose it only with keys, a password and HTTPS in front. |
-| **Hardened container** | Runs as a non-root user with all Linux capabilities dropped and `no-new-privileges`. |
-| **Input limits** | Request bodies over `MAX_BODY_BYTES` are rejected; team/feature names are sanitized before they're stored or displayed. |
-| **Safe headers** | CSP, `X-Frame-Options: DENY`, `nosniff`; API docs endpoints are disabled. |
+| **Cost tracking** | Tokens, reasoning tokens, cost and latency per team, feature and model; live dashboard and `/stats` |
+| **Cache** | Repeat deterministic calls (`temperature: 0`) answered at $0, isolated per API key |
+| **Model routing** | `"model": "auto"` sends simple prompts to the cheap tier, complex ones (tools, long prompts, "analyze", "debug"…) to the strong tier |
+| **Reasoning control** | Cheap tier gets `reasoning_effort: low` and an output cap; reasoning tokens are tracked even when the provider doesn't report them |
+| **Budgets** | Daily limit per team; each call's cost is estimated first, so a team is stopped *before* it overspends |
+| **Failover** | On 429/5xx or outages, retries on backup providers from `routing.json` (e.g. Groq → Gemini) |
+| **Streaming** | Pass-through for both APIs, with usage priced from the stream |
+| **Security** | Per-team keys, dashboard login, input limits, security headers, hardened non-root container, localhost-only by default |
 
-Generate a proxy key:
-
-```bash
-python3 -c "import secrets; print('k_' + secrets.token_urlsafe(24))"
-```
-
-Call through a locked-down proxy:
-
-```bash
-curl http://localhost:8080/openai/v1/chat/completions \
-  -H "X-Cost-Guard-Key: k_your_team_key" -H "X-Feature: summarize" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "auto", "messages": [{"role": "user", "content": "Say hello"}]}'
-```
-
-Every pull request runs the tests, a dependency vulnerability check (`pip-audit`), a static security scan (`bandit`) and a Docker build. See [SECURITY.md](SECURITY.md) to report a vulnerability.
+Why these levers? In a real test, **over 99% of a call's cost was the model's hidden reasoning output** (83 tokens in, 3,072 out). See [Results](docs/Results.md).
 
 ## Configuration
 
+All settings live in `.env` (see [`.env.example`](.env.example)), `routing.json` and `pricing.json`.
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Upstream for the OpenAI-compatible route |
-| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Upstream for the Anthropic route |
-| `CACHE_MODE` | `deterministic` | `deterministic` (temperature 0 only), `all`, or `off` |
-| `CACHE_TTL_SECONDS` | `86400` | How long cached responses stay valid |
-| `DB_PATH` | `data/costguard.db` | SQLite file for logs and cache |
-| `ROUTING_PATH` | `routing.json` | Routing rules for `"model": "auto"` |
-| `COST_GUARD_KEYS` | (empty = dev mode) | Per-team proxy keys, `team:key,...` |
-| `DASHBOARD_PASSWORD` | (empty = open) | Password for the dashboard and `/stats` |
-| `BUDGETS` | (empty) | Daily USD limit per team, `team:amount,...` |
-| `MAX_BODY_BYTES` | `1000000` | Largest request body accepted |
+| `OPENAI_BASE_URL` | Groq | Any OpenAI-compatible API |
+| `OPENAI_API_KEY` | | Provider key, used when the caller doesn't send one |
+| `COST_GUARD_KEYS` | (dev mode) | Per-team gateway keys, `team:key,...` |
+| `DASHBOARD_PASSWORD` | (open) | Protects the dashboard and `/stats` |
+| `BUDGETS` | | Daily USD limit per team, `team:amount,...` |
+| `DEFAULT_OUTPUT_ESTIMATE` | `1024` | Output tokens assumed in estimates when a request sets no limit |
+| `GEMINI_API_KEY` etc. | | Keys for backup providers listed under `fallbacks` in `routing.json` |
+| `CACHE_MODE` | `deterministic` | `deterministic`, `all` or `off` |
+| `MAX_BODY_BYTES` | `1000000` | Largest request accepted |
 
-Prices in `pricing.json` are examples (USD per 1M tokens). Check them against each provider's pricing page.
+**Failover example** (`routing.json`):
 
-## Tests
-
-```bash
-pip install -r requirements-dev.txt
-pytest
+```json
+"fallbacks": {
+  "openai": [
+    { "name": "gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key_env": "GEMINI_API_KEY", "models": { "*": "gemini-2.5-flash" },
+      "drop_params": ["reasoning_effort"] }
+  ]
+}
 ```
 
-## Roadmap
+## Development
 
-- [x] Streaming responses
-- [x] Model routing: send simple prompts to cheaper models
-- [x] Budgets per team
-- [ ] Budget alerts (Slack/email)
-- [ ] Semantic cache (similar prompts, not just identical ones)
-- [ ] Prometheus metrics and a Grafana dashboard
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+ruff check app tests scripts && mypy app && pytest --cov
+```
 
-## Notes
+Every pull request runs lint, type checks, 31 tests (85% coverage minimum), `pip-audit`, `bandit` and a Docker build. A separate [live smoke test](.github/workflows/live-smoke.yml) runs the gateway against the real Groq API on every push to `main` and weekly, using a key stored as a GitHub **environment secret** (never exposed to pull requests).
 
-- The cache is shared by everyone using the proxy. Run one proxy per trust boundary.
-- Never commit your `.env` file or API keys. `.gitignore` already excludes `.env`.
+## Security
+
+See [docs/Security.md](docs/Security.md) for the threat model, and [SECURITY.md](SECURITY.md) to report a vulnerability privately.
+
+## License
+
+[MIT](LICENSE)

@@ -2,15 +2,16 @@
 
 **A drop-in gateway that shows what every AI call costs, and cuts that cost automatically.**
 
-Companies are putting large language models (LLMs) into real products. The bills grow fast, and almost nobody can answer simple questions like *"which team spent this?"* or *"did that feature need the expensive model?"* LLM Cost Guard sits between your apps and the AI providers, measures every call, and applies three proven savings levers: caching, model routing and budgets.
+Companies are putting large language models (LLMs) into real products. The bills grow fast, and almost nobody can answer simple questions like *"which team spent this?"* or *"did that feature need the expensive model?"* LLM Cost Guard sits between your apps and the AI providers, measures every call, and applies four savings levers: caching, model routing, reasoning control and budgets, with failover to a backup provider.
 
 ```
 your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini / Ollama
                  │
                  ├─ measures tokens, cost and latency per team and feature
                  ├─ answers repeat questions from cache ($0)
-                 ├─ sends simple prompts to a cheaper model
-                 └─ stops a team at its daily budget
+                 ├─ sends simple prompts to a cheaper model with low reasoning effort
+                 ├─ stops a team before it goes over its daily budget
+                 └─ fails over to a backup provider on rate limits and outages
 ```
 
 ## At a glance
@@ -19,10 +20,14 @@ your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini /
 |---|---|
 | **Problem** | AI spend is growing fast with no visibility or control per team or feature |
 | **Solution** | A small proxy: change one URL in your app, get cost tracking and savings |
-| **Savings levers** | Response cache, automatic model routing, per-team daily budgets |
+| **Savings levers** | Response cache, model routing, reasoning control, per-team budgets with pre-call estimates |
+| **Reliability** | Failover to backup providers on rate limits and outages |
 | **Security** | Per-team keys, dashboard login, cache isolation, hardened container |
 | **Works with** | Any OpenAI-compatible API (OpenAI, Groq, Gemini, OpenRouter, Ollama) and Anthropic |
 | **Stack** | Python, FastAPI, SQLite, Docker, GitHub Actions |
+| **License** | MIT |
+
+![Dashboard](images/dashboard.png)
 
 ## Read next
 

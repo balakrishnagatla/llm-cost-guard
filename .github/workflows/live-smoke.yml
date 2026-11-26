@@ -1,0 +1,56 @@
+name: Live smoke test
+
+# Runs the gateway against the real Groq API using the GROQ_API_KEY secret stored in
+# the "live" environment. Never runs on pull requests, so the key can't be reached
+# from forks or untrusted branches.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays 06:17 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-smoke
+  cancel-in-progress: true
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    environment: live
+    timeout-minutes: 10
+    env:
+      OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || 'https://api.groq.com/openai/v1' }}
+      OPENAI_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      DB_PATH: /tmp/costguard.db
+    steps:
+      - name: Skip when no key is configured
+        id: check
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "GROQ_API_KEY is not set in the 'live' environment; skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.check.outputs.skip != 'true'
+      - uses: actions/setup-python@v7
+        if: steps.check.outputs.skip != 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: steps.check.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+      - name: Start the gateway
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          uvicorn app.main:app --port 8080 > /tmp/server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8080/health && break; sleep 1; done
+      - name: Run live checks
+        if: steps.check.outputs.skip != 'true'
+        run: python scripts/live_smoke.py
+      - name: Server log
+        if: always() && steps.check.outputs.skip != 'true'
+        run: tail -50 /tmp/server.log
