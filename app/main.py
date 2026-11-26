@@ -15,13 +15,19 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import logging
+
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from . import db
 from .pricing import cost_usd, is_priced
 from .router import route
+from .security import (clean_label, credential_fingerprint, parse_budgets, proxy_keys,
+                       require_dashboard_login, resolve_team)
+
+log = logging.getLogger("cost_guard")
 
 OPENAI_BASE = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
@@ -29,17 +35,37 @@ ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rs
 CACHE_MODE = os.getenv("CACHE_MODE", "deterministic").lower()
 CACHE_TTL_SECONDS = float(os.getenv("CACHE_TTL_SECONDS", "86400"))
 UPSTREAM_TIMEOUT = float(os.getenv("UPSTREAM_TIMEOUT", "120"))
+MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(1_000_000)))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    # Fail fast on bad config instead of at the first request.
+    keys = proxy_keys()
+    app.state.budgets = parse_budgets(os.getenv("BUDGETS", ""))
+    if not keys:
+        log.warning("COST_GUARD_KEYS is not set: proxy is in open dev mode. Keep it on localhost.")
+    if not os.getenv("DASHBOARD_PASSWORD"):
+        log.warning("DASHBOARD_PASSWORD is not set: dashboard and /stats are not password protected.")
     app.state.client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
     yield
     await app.state.client.aclose()
 
 
-app = FastAPI(title="LLM Cost Guard", lifespan=lifespan)
+app = FastAPI(title="LLM Cost Guard", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+    return response
 
 
 # ---------- provider-specific usage parsing ----------
@@ -110,10 +136,26 @@ def _guard_headers(model: str, reason: str | None, cache: str, cost: float | Non
 # ---------- core proxy ----------
 
 async def _proxy(request: Request, provider: str, url: str, headers: dict) -> Response:
+    team = resolve_team(request)  # 401 if a key is required and missing
+
+    if int(request.headers.get("content-length") or 0) > MAX_BODY_BYTES:
+        raise HTTPException(413, "Request body too large")
+    raw = await request.body()
+    if len(raw) > MAX_BODY_BYTES:
+        raise HTTPException(413, "Request body too large")
     try:
-        body = await request.json()
-    except json.JSONDecodeError:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(400, "Request body must be JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Request body must be a JSON object")
+
+    budget = request.app.state.budgets.get(team)
+    if budget is not None:
+        spent = db.spent_today(team)
+        if spent >= budget:
+            raise HTTPException(429, f"Daily budget for team '{team}' reached (${spent:.4f} of ${budget:.2f}). "
+                                     "Resets at 00:00 UTC.")
 
     requested = body.get("model", "unknown")
     try:
@@ -124,8 +166,8 @@ async def _proxy(request: Request, provider: str, url: str, headers: dict) -> Re
 
     meta = dict(
         provider=provider, model=model, requested_model=requested,
-        team=request.headers.get("x-team", "unknown"),
-        feature=request.headers.get("x-feature", "unknown"),
+        team=team,
+        feature=clean_label(request.headers.get("x-feature")),
         priced=int(is_priced(model)),
     )
     funcs = PROVIDERS[provider]
@@ -134,7 +176,9 @@ async def _proxy(request: Request, provider: str, url: str, headers: dict) -> Re
     if body.get("stream"):
         return await _proxy_stream(request, provider, url, headers, body, meta, baseline, reason, start)
 
-    key = hashlib.sha256((provider + json.dumps(body, sort_keys=True)).encode()).hexdigest()
+    # Cache entries are scoped to the upstream credential so answers never leak across API keys.
+    key = hashlib.sha256(
+        (provider + credential_fingerprint(headers) + json.dumps(body, sort_keys=True)).encode()).hexdigest()
     if _cacheable(body):
         cached = db.get_cached(key, CACHE_TTL_SECONDS)
         if cached is not None:
@@ -237,9 +281,15 @@ async def anthropic_messages(request: Request):
     return await _proxy(request, "anthropic", f"{ANTHROPIC_BASE}/v1/messages", headers)
 
 
-@app.get("/stats")
-def get_stats():
-    return db.stats()
+@app.get("/stats", dependencies=[Depends(require_dashboard_login)])
+def get_stats(request: Request):
+    s = db.stats()
+    spent = db.spent_today_by_team()
+    s["budgets"] = [
+        {"team": t, "budget_usd": b, "spent_today_usd": round(spent.get(t, 0.0), 6)}
+        for t, b in sorted(request.app.state.budgets.items())
+    ]
+    return s
 
 
 @app.get("/health")
@@ -247,7 +297,7 @@ def health():
     return {"ok": True}
 
 
-@app.get("/", response_class=HTMLResponse)
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_dashboard_login)])
+@app.get("/dashboard", response_class=HTMLResponse, dependencies=[Depends(require_dashboard_login)])
 def dashboard():
     return (Path(__file__).parent / "dashboard.html").read_text()

@@ -2,9 +2,16 @@ services:
   cost-guard:
     build: .
     ports:
-      - "8080:8080"
+      # Only reachable from this computer. To expose it on a network, set
+      # COST_GUARD_KEYS and DASHBOARD_PASSWORD first and put it behind HTTPS.
+      - "127.0.0.1:8080:8080"
     env_file: .env
     volumes:
       - ./data:/srv/data
       - ./pricing.json:/srv/pricing.json:ro
       - ./routing.json:/srv/routing.json:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
