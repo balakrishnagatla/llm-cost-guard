@@ -61,6 +61,7 @@ def test_daily_budget_blocks_calls(client):
         assert r1.status_code == 200 and r2.status_code == 200  # 0.00045 then 0.00090 spent
         r3 = client.post("/openai/v1/chat/completions", headers=h, json=chat("c", model="gpt-4o-mini"))
         assert r3.status_code == 429
+        assert "$0.0009 of $0.0005" in r3.json()["detail"]
         assert len(seen) == 2  # blocked call never reached the provider
         b = client.get("/stats").json()["budgets"]
         assert b == [{"team": "search", "budget_usd": 0.0005, "spent_today_usd": 0.0009}]

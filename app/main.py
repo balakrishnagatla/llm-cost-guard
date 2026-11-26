@@ -154,7 +154,7 @@ async def _proxy(request: Request, provider: str, url: str, headers: dict) -> Re
     if budget is not None:
         spent = db.spent_today(team)
         if spent >= budget:
-            raise HTTPException(429, f"Daily budget for team '{team}' reached (${spent:.4f} of ${budget:.2f}). "
+            raise HTTPException(429, f"Daily budget for team '{team}' reached (${spent:.6g} of ${budget:.6g}). "
                                      "Resets at 00:00 UTC.")
 
     requested = body.get("model", "unknown")
