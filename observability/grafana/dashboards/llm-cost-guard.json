@@ -239,7 +239,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (model) (rate(costguard_requests_total[5m])) * 60",
+          "expr": "sum by (model) (rate(costguard_requests_total[$__rate_interval])) * 60",
           "legendFormat": "{{model}}"
         }
       ],
@@ -253,7 +253,7 @@
     },
     {
       "id": 7,
-      "title": "Reasoning share of output by model",
+      "title": "Reasoning share of output by model (last hour)",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -272,7 +272,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (model) (rate(costguard_tokens_total{kind=\"reasoning\"}[15m])) / sum by (model) (rate(costguard_tokens_total{kind=\"output\"}[15m]))",
+          "expr": "sum by (model) (increase(costguard_tokens_total{kind=\"reasoning\"}[1h])) / sum by (model) (increase(costguard_tokens_total{kind=\"output\"}[1h]))",
           "legendFormat": "{{model}}"
         }
       ],
@@ -286,7 +286,7 @@
     },
     {
       "id": 8,
-      "title": "p95 latency by upstream",
+      "title": "p95 latency by upstream (last 30 min)",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -305,7 +305,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, upstream) (rate(costguard_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, upstream) (increase(costguard_request_duration_seconds_bucket[30m])))",
           "legendFormat": "{{upstream}}"
         }
       ],
@@ -338,7 +338,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (upstream, reason) (increase(costguard_upstream_errors_total[5m]))",
+          "expr": "sum by (upstream, reason) (increase(costguard_upstream_errors_total[$__rate_interval]))",
           "legendFormat": "{{upstream}} {{reason}}"
         }
       ],
@@ -371,7 +371,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (team) (increase(costguard_requests_total{upstream=\"blocked\"}[5m]))",
+          "expr": "sum by (team) (increase(costguard_requests_total{upstream=\"blocked\"}[$__rate_interval]))",
           "legendFormat": "{{team}}"
         }
       ],
