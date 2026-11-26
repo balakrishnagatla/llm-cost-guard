@@ -64,9 +64,13 @@ First real test against Groq: routing, caching and cost tracking all worked, and
 - Demo traffic covers 13 teams
 - Real-traffic results (88 calls, 12 teams) and screenshots of the dashboard, Grafana and Jaeger in the docs
 
+### v0.5.2
+
+- Security: the cache key's credential fingerprint is now a salted PBKDF2 hash instead of an unsalted SHA-256 (CodeQL `py/weak-sensitive-data-hashing`)
+
 ## Quality bar
 
-- 55 automated tests (security, routing, reasoning control, budgets, failover, streaming, tracing, metrics, upgrades); 96% coverage
+- 56 automated tests (security, routing, reasoning control, budgets, failover, streaming, tracing, metrics, upgrades); 96% coverage
 - Lint, type checks, dependency audit and static security scan on every pull request
 - Live test against the real provider on every merge to `main`
 - End-to-end test with every protection enabled, probing the gateway as an attacker would
