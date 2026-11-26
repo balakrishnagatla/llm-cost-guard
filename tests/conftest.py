@@ -30,6 +30,7 @@ class FakeUpstream:
         self.seen: list[dict] = []
         self.hosts: list[str] = []
         self.fail: dict[str, int] = {}  # host -> status code to return
+        self.down: set[str] = set()  # hosts that can't be reached at all
         self.reasoning_text = ""
         self.reported_reasoning: int | None = None
 
@@ -38,6 +39,8 @@ class FakeUpstream:
         host = request.url.host
         self.seen.append(body)
         self.hosts.append(host)
+        if host in self.down:
+            raise httpx.ConnectError("simulated outage", request=request)
         if host in self.fail:
             return httpx.Response(self.fail[host], json={"error": "simulated"})
         anthropic = "anthropic" in host

@@ -4,76 +4,175 @@
 <meta charset="utf-8">
 <title>LLM Cost Guard</title>
 <style>
+  :root { --muted: #666; --line: #e5e5e5; --good: #137333; --warn: #b06000; --bad: #c5221f; --accent: #1a73e8; }
   body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; background: #fafafa; }
   h1 { margin-bottom: .25rem; }
-  .sub { color: #666; margin-top: 0; }
-  .tiles { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1.5rem 0; }
-  .tile { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 1rem 1.25rem; min-width: 150px; }
-  .tile .v { font-size: 1.6rem; font-weight: 600; }
-  .tile .l { color: #666; font-size: .85rem; }
-  .saved .v { color: #137333; }
-  table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 2rem; }
-  th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid #eee; }
+  h2 { margin-top: 2rem; }
+  .sub { color: var(--muted); margin-top: 0; }
+  .tiles { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1.25rem 0; }
+  .tile { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem; min-width: 150px; }
+  .tile .v { font-size: 1.5rem; font-weight: 600; }
+  .tile .l { color: var(--muted); font-size: .85rem; }
+  .tile.saved .v { color: var(--good); }
+  .tile.warn .v { color: var(--warn); }
+  .tile.bad .v { color: var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1.5rem; }
+  table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 1rem; }
+  th, td { text-align: left; padding: .45rem .7rem; border-bottom: 1px solid #eee; font-size: .92rem; }
   th { background: #f3f3f3; font-weight: 600; }
   td.n { text-align: right; font-variant-numeric: tabular-nums; }
-  .warn { color: #b06000; }
-  .bar { background: #eee; border-radius: 4px; height: 10px; min-width: 160px; }
-  .fill { background: #137333; height: 10px; border-radius: 4px; }
+  tr.click { cursor: pointer; }
+  tr.click:hover { background: #f0f6ff; }
+  .bar { background: #eee; border-radius: 4px; height: 10px; min-width: 120px; }
+  .fill { background: var(--good); height: 10px; border-radius: 4px; }
   .fill.warn { background: #e8a200; }
-  .fill.over { background: #c5221f; }
+  .fill.over { background: var(--bad); }
+  .fill.blue { background: var(--accent); }
+  .chart { display: flex; align-items: flex-end; gap: 4px; height: 140px; background: #fff; border: 1px solid var(--line);
+           border-radius: 8px; padding: 12px; }
+  .chart .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 14px; }
+  .chart .b { width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; }
+  .chart .s { width: 100%; background: #81c995; }
+  .chart .x { font-size: .7rem; color: var(--muted); margin-top: 4px; }
+  .legend { font-size: .8rem; color: var(--muted); margin: .4rem 0 0; }
+  .legend i { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 10px; border-radius: 2px; }
+  .pill { font-size: .75rem; padding: 1px 7px; border-radius: 10px; background: #eee; }
+  .pill.hit { background: #e6f4ea; color: var(--good); }
+  .pill.err { background: #fce8e6; color: var(--bad); }
+  .pill.fb { background: #fef7e0; color: var(--warn); }
+  #trace { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem; display: none; }
+  #trace pre { font-size: .85rem; line-height: 1.5; white-space: pre-wrap; margin: 0; }
+  .muted { color: var(--muted); }
 </style>
 </head>
 <body>
 <h1>LLM Cost Guard</h1>
-<p class="sub">Spend by team, feature and model. Refreshes every 10 seconds.</p>
+<p class="sub">Spend, savings and every call's journey. Refreshes every 10 seconds.</p>
+
 <div class="tiles" id="tiles"></div>
+
+<h2>Spend over the last 24 hours</h2>
+<div class="chart" id="chart"></div>
+<p class="legend"><i style="background:#1a73e8"></i>spend <i style="background:#81c995"></i>saved</p>
+
+<h2>Insights</h2>
+<div class="grid" id="insights"></div>
+
+<h2>Recent calls <span class="muted" style="font-size:.9rem;font-weight:400">(click a row to see its trace)</span></h2>
+<div id="trace"></div>
+<div id="calls"></div>
+
 <div id="tables"></div>
+
 <script>
 // Escape anything that came from a request (team/feature/model names) before it touches innerHTML.
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const usd = v => { const n = Number(v || 0); return '$' + (n !== 0 && Math.abs(n) < 0.01 ? n.toFixed(6) : n.toFixed(4)); };
 const num = v => Number(v || 0).toLocaleString();
+const pct = v => Math.round(100 * Number(v || 0)) + '%';
+const time = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+
 function tile(label, value, cls = '') {
   return `<div class="tile ${cls}"><div class="v">${value}</div><div class="l">${label}</div></div>`;
 }
-function table(title, rows) {
+function simpleTable(title, head, rows) {
+  if (!rows.length) return `<div><h3>${esc(title)}</h3><p class="muted">No data yet.</p></div>`;
+  return `<div><h3>${esc(title)}</h3><table><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr>${rows.join('')}</table></div>`;
+}
+function group(title, rows) {
   if (!rows.length) return '';
   const body = rows.map(r => `<tr><td>${esc(r.name)}</td><td class="n">${num(r.calls)}</td>
     <td class="n">${num(r.input_tokens)}</td><td class="n">${num(r.output_tokens)}</td><td class="n">${num(r.reasoning_tokens)}</td>
-    <td class="n">${usd(r.cost_usd)}</td><td class="n">${usd(r.saved_usd)}</td>
-    <td class="n">${usd(r.routing_saved_usd)}</td></tr>`).join('');
-  return `<h2>${esc(title)}</h2><table><tr><th>Name</th><th>Calls</th><th>Input tokens</th>
-    <th>Output tokens</th><th>Reasoning tokens</th><th>Cost</th><th>Saved by cache</th><th>Saved by routing</th></tr>${body}</table>`;
+    <td class="n">${usd(r.cost_usd)}</td><td class="n">${usd(r.saved_usd)}</td><td class="n">${usd(r.routing_saved_usd)}</td></tr>`).join('');
+  return `<h2>${esc(title)}</h2><table><tr><th>Name</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th>
+    <th>Reasoning tokens</th><th>Cost</th><th>Saved by cache</th><th>Saved by routing</th></tr>${body}</table>`;
 }
 function budgets(rows) {
   if (!rows || !rows.length) return '';
   const body = rows.map(b => {
-    const pct = b.budget_usd > 0 ? Math.min(100, 100 * b.spent_today_usd / b.budget_usd) : 100;
-    const cls = pct >= 100 ? 'over' : pct >= 80 ? 'warn' : '';
+    const p = b.budget_usd > 0 ? Math.min(100, 100 * b.spent_today_usd / b.budget_usd) : 100;
+    const cls = p >= 100 ? 'over' : p >= 80 ? 'warn' : '';
     return `<tr><td>${esc(b.team)}</td><td class="n">${usd(b.spent_today_usd)}</td><td class="n">${usd(b.budget_usd)}</td>
-      <td><div class="bar"><div class="fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div></td></tr>`;
+      <td><div class="bar"><div class="fill ${cls}" style="width:${p.toFixed(1)}%"></div></div></td></tr>`;
   }).join('');
   return `<h2>Daily budgets (UTC)</h2><table><tr><th>Team</th><th>Spent today</th><th>Budget</th><th>Used</th></tr>${body}</table>`;
 }
-async function load() {
-  const res = await fetch('/stats');
+function chart(hourly) {
+  if (!hourly.length) return '<p class="muted">No calls in the last 24 hours.</p>';
+  const max = Math.max(...hourly.map(h => h.cost_usd + h.saved_usd), 1e-12);
+  return hourly.map(h => {
+    const hs = 110 * h.cost_usd / max, hv = 110 * h.saved_usd / max;
+    const label = new Date(h.hour * 1000).getHours() + 'h';
+    return `<div class="col" title="${label}: ${h.calls} calls, spend ${usd(h.cost_usd)}, saved ${usd(h.saved_usd)}">
+      <div class="s" style="height:${hv}px"></div><div class="b" style="height:${hs}px"></div><div class="x">${label}</div></div>`;
+  }).join('');
+}
+function insights(i) {
+  const top = i.top_calls.map(c => `<tr class="click" data-id="${esc(c.request_id)}"><td>${esc(c.team)} / ${esc(c.feature)}</td>
+    <td>${esc(c.model)}</td><td class="n">${num(c.output_tokens)}</td><td class="n">${usd(c.cost_usd)}</td></tr>`);
+  const feat = i.cost_per_call_by_feature.map(f => `<tr><td>${esc(f.feature)}</td><td class="n">${num(f.calls)}</td>
+    <td class="n">${usd(f.avg_cost_usd)}</td></tr>`);
+  const reas = i.reasoning_share_by_model.map(m => `<tr><td>${esc(m.model)}</td><td class="n">${num(m.reasoning_tokens)} / ${num(m.output_tokens)}</td>
+    <td><div class="bar"><div class="fill blue" style="width:${(100 * m.share).toFixed(1)}%"></div></div></td><td class="n">${pct(m.share)}</td></tr>`);
+  const lat = i.latency_by_upstream.map(l => `<tr><td>${esc(l.upstream)}</td><td class="n">${num(l.calls)}</td>
+    <td class="n">${num(l.p50_ms)} ms</td><td class="n">${num(l.p95_ms)} ms</td></tr>`);
+  return simpleTable('Most expensive calls', ['Team / feature', 'Model', 'Output tokens', 'Cost'], top) +
+    simpleTable('Average cost per call, by feature', ['Feature', 'Calls', 'Avg cost'], feat) +
+    simpleTable('Reasoning share of output, by model', ['Model', 'Reasoning / output', '', 'Share'], reas) +
+    simpleTable('Latency by upstream', ['Upstream', 'Calls', 'p50', 'p95'], lat);
+}
+function calls(rows) {
+  if (!rows.length) return '<p class="muted">No calls yet.</p>';
+  const body = rows.map(c => {
+    let state = c.cache_hit ? '<span class="pill hit">cache</span>' : '';
+    if (c.upstream === 'blocked') state = '<span class="pill err">budget</span>';
+    else if (c.status >= 400) state = `<span class="pill err">${c.status}</span>`;
+    else if (!['primary', 'cache'].includes(c.upstream)) state = `<span class="pill fb">${esc(c.upstream)}</span>`;
+    if (c.streamed) state += ' <span class="pill">stream</span>';
+    return `<tr class="click" data-id="${esc(c.request_id)}"><td>${time(c.ts)}</td><td>${esc(c.team)}</td><td>${esc(c.feature)}</td>
+      <td>${esc(c.model)}</td><td>${state}</td><td class="n">${num(c.output_tokens)}</td><td class="n">${usd(c.cost_usd)}</td>
+      <td class="n">${num(Math.round(c.latency_ms))} ms</td></tr>`;
+  }).join('');
+  return `<table><tr><th>Time</th><th>Team</th><th>Feature</th><th>Model</th><th></th><th>Output</th><th>Cost</th><th>Latency</th></tr>${body}</table>`;
+}
+async function showTrace(id) {
+  const res = await fetch('/calls/' + encodeURIComponent(id));
   if (!res.ok) return;
-  const s = await res.json();
-  const t = s.totals;
+  const c = await res.json();
+  const lines = c.trace.map(s => `${s.ok ? '✓' : '✗'} ${s.step.padEnd(9)} ${s.detail}` + (s.ms >= 1 ? `   (${s.ms} ms)` : ''));
+  const box = document.getElementById('trace');
+  box.innerHTML = `<strong>Request ${esc(c.request_id)}</strong> <span class="muted">· ${esc(c.team)} / ${esc(c.feature)} ·
+    ${num(Math.round(c.latency_ms))} ms total</span><pre>${esc(lines.join('\n'))}</pre>`;
+  box.style.display = 'block';
+  box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+document.addEventListener('click', e => {
+  const row = e.target.closest('tr.click');
+  if (row) showTrace(row.dataset.id);
+});
+async function load() {
+  const [sr, cr] = await Promise.all([fetch('/stats'), fetch('/calls?limit=25')]);
+  if (!sr.ok || !cr.ok) return;
+  const s = await sr.json(), t = s.totals, i = s.insights;
   const hitRate = t.calls ? Math.round(100 * t.cache_hits / t.calls) + '%' : '0%';
   document.getElementById('tiles').innerHTML =
     tile('Total spend', usd(t.cost_usd)) +
-    tile('Saved by cache', usd(t.saved_usd), 'saved') +
-    tile('Saved by routing (est.)', usd(t.routing_saved_usd), 'saved') +
+    tile('Saved (cache + routing)', usd(t.saved_usd + t.routing_saved_usd), 'saved') +
+    tile('Savings rate', pct(i.savings_rate), 'saved') +
     tile('Calls', num(t.calls)) +
     tile('Cache hit rate', hitRate) +
-    tile('Reasoning share of output', t.output_tokens ? Math.round(100 * t.reasoning_tokens / t.output_tokens) + '%' : '0%') +
+    tile('Reasoning share of output', t.output_tokens ? pct(t.reasoning_tokens / t.output_tokens) : '0%') +
     tile('Routed calls', num(t.routed_calls)) +
+    tile('Avg latency', num(Math.round(t.avg_latency_ms)) + ' ms') +
     (t.fallback_calls ? tile('Failover calls', num(t.fallback_calls), 'warn') : '') +
-    tile('Avg latency', t.avg_latency_ms + ' ms') +
+    (i.blocked_calls ? tile('Blocked by budget', num(i.blocked_calls), 'bad') : '') +
+    (i.error_calls ? tile('Errors', num(i.error_calls), 'bad') : '') +
     (t.unpriced_calls ? tile('Calls with no price set', num(t.unpriced_calls), 'warn') : '');
+  document.getElementById('chart').innerHTML = chart(i.hourly);
+  document.getElementById('insights').innerHTML = insights(i);
+  document.getElementById('calls').innerHTML = calls((await cr.json()).calls);
   document.getElementById('tables').innerHTML = budgets(s.budgets) +
-    table('By team', s.by_team) + table('By feature', s.by_feature) + table('By model', s.by_model);
+    group('By team', s.by_team) + group('By feature', s.by_feature) + group('By model', s.by_model);
 }
 load(); setInterval(load, 10000);
 </script>

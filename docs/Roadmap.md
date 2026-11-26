@@ -8,6 +8,11 @@ Ordered by expected savings, based on what the [test results](Results.md) showed
 - ✅ Pre-call cost estimates for budgets
 - ✅ Failover across providers
 
+## Done in v0.5
+
+- ✅ Per-call tracing, insights, Prometheus + Grafana, OpenTelemetry export
+- ✅ Demo traffic generator
+
 ## Next: measure the reasoning savings
 
 - Re-run the Groq test with reasoning control on and publish the before/after numbers in [Results](Results.md)
@@ -27,6 +32,5 @@ Ordered by expected savings, based on what the [test results](Results.md) showed
 
 ## Platform
 
-- Prometheus metrics and a Grafana dashboard
 - Postgres option for multi-instance deployments
 - Helm chart for Kubernetes

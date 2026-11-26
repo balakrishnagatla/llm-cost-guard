@@ -8,10 +8,10 @@ Set "model": "auto" to let the gateway pick a cheap or strong model.
 import codecs
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
 import os
-import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -19,9 +19,19 @@ from pathlib import Path
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from . import __version__, db
+from .observability import (
+    REGISTRY,
+    UPSTREAM_ERRORS,
+    Trace,
+    emit_span,
+    init_tracing,
+    record_metrics,
+    register_budget_collector,
+)
 from .pricing import cost_usd, estimate_tokens, is_priced
 from .router import Route, fallbacks_for, prompt_text, route
 from .security import (
@@ -58,6 +68,8 @@ async def lifespan(app: FastAPI):
         log.warning("COST_GUARD_KEYS is not set: gateway is in open dev mode. Keep it on localhost.")
     if not os.getenv("DASHBOARD_PASSWORD"):
         log.warning("DASHBOARD_PASSWORD is not set: dashboard and /stats are not password protected.")
+    register_budget_collector(lambda: app.state.budgets, db.spent_today_by_team)
+    init_tracing()
     app.state.client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
     yield
     await app.state.client.aclose()
@@ -177,9 +189,10 @@ def estimate_call_cost(model: str, body: dict) -> float:
     return cost_usd(model, in_t, out_t)
 
 
-def _guard_headers(rt: Route, cache: str, upstream: str, cost: float | None = None,
+def _guard_headers(trace: Trace, rt: Route, cache: str, upstream: str, cost: float | None = None,
                    estimate: float | None = None) -> dict[str, str]:
-    h = {"x-cost-guard-model": rt.model, "x-cost-guard-cache": cache, "x-cost-guard-upstream": upstream}
+    h = {"x-request-id": trace.request_id, "x-cost-guard-model": rt.model, "x-cost-guard-cache": cache,
+         "x-cost-guard-upstream": upstream}
     if rt.reason:
         h["x-cost-guard-route-reason"] = rt.reason
     if cost is not None:
@@ -213,24 +226,45 @@ def _attempts(provider: str, url: str, headers: dict, body: dict) -> list[Attemp
     return attempts
 
 
-async def _send(client: httpx.AsyncClient, attempts: list[Attempt], stream: bool) -> tuple[Attempt, httpx.Response]:
+class UpstreamsFailed(Exception):
+    pass
+
+
+async def _send(client: httpx.AsyncClient, attempts: list[Attempt], stream: bool,
+                trace: Trace) -> tuple[Attempt, httpx.Response]:
     """Try each upstream in order; move on when one is rate-limited, failing or unreachable."""
-    last_error: Exception | None = None
+    last_error = "no upstream configured"
     for i, a in enumerate(attempts):
         is_last = i == len(attempts) - 1
+        started = trace.now_ms()
         try:
             resp = await client.send(client.build_request("POST", a.url, json=a.body, headers=a.headers),
                                      stream=stream)
         except httpx.HTTPError as e:
-            last_error = e
+            last_error = f"{a.name} unreachable: {type(e).__name__}"
             log.warning("Upstream %s unreachable: %s", a.name, e)
+            UPSTREAM_ERRORS.labels(a.name, "unreachable").inc()
+            trace.add("upstream", f"{a.name} ({a.body['model']}) unreachable", ok=False, started_ms=started)
             continue
-        if resp.status_code in RETRYABLE_STATUS and not is_last:
-            log.warning("Upstream %s returned %s, trying next", a.name, resp.status_code)
-            await resp.aclose()
-            continue
+        ok = resp.status_code < 400
+        trace.add("upstream", f"{a.name} ({a.body['model']}) -> HTTP {resp.status_code}", ok=ok, started_ms=started)
+        if resp.status_code in RETRYABLE_STATUS:
+            UPSTREAM_ERRORS.labels(a.name, str(resp.status_code)).inc()
+            if not is_last:
+                log.warning("Upstream %s returned %s, trying next", a.name, resp.status_code)
+                await resp.aclose()
+                continue
         return a, resp
-    raise HTTPException(502, f"All upstreams failed: {last_error}")
+    raise UpstreamsFailed(last_error)
+
+
+def _record(trace: Trace, **row) -> None:
+    """Store a call with its trace, update metrics and export the span."""
+    row["request_id"] = trace.request_id
+    row["trace"] = json.dumps(trace.steps)
+    db.log_call(**row)
+    record_metrics(row)
+    emit_span(trace, row)
 
 
 async def _read_json(request: Request) -> dict:
@@ -250,8 +284,19 @@ async def _read_json(request: Request) -> dict:
 
 # ---------- core ----------
 
+def _usage_detail(u: Usage, cost: float) -> str:
+    return f"{u.input} in / {u.output} out ({u.reasoning} reasoning) = ${cost:.6f}"
+
+
+def _error(trace: Trace, status: int, detail: str) -> HTTPException:
+    return HTTPException(status, detail, headers={"x-request-id": trace.request_id})
+
+
 async def _proxy(request: Request, provider_name: str, url: str, headers: dict) -> Response:
+    trace = Trace()
+    t = trace.now_ms()
     team = resolve_team(request)  # 401 if a key is required and missing
+    trace.add("auth", f"team {team}", started_ms=t)
     body = await _read_json(request)
     provider = PROVIDERS[provider_name]
 
@@ -259,42 +304,66 @@ async def _proxy(request: Request, provider_name: str, url: str, headers: dict) 
     try:
         rt = route(provider_name, body)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _error(trace, 400, str(e))
     body["model"] = rt.model
-    for k, v in rt.params.items():  # tier defaults; the caller's own settings win
-        body.setdefault(k, v)
+    added = {k: v for k, v in rt.params.items() if k not in body}
+    body.update(added)  # tier defaults; the caller's own settings win
+    if rt.tier:
+        extras = ", ".join(f"{k}={v}" for k, v in added.items())
+        trace.add("route", f"auto -> {rt.model} ({rt.tier}: {rt.reason})" + (f"; {extras}" if extras else ""))
+    else:
+        trace.add("route", f"{rt.model} (requested explicitly)")
+
+    meta = {"provider": provider_name, "requested_model": requested, "team": team,
+            "feature": clean_label(request.headers.get("x-feature"))}
 
     estimate = estimate_call_cost(rt.model, body)
     budget = request.app.state.budgets.get(team)
     if budget is not None:
         spent = db.spent_today(team)
         if spent + estimate > budget:
-            raise HTTPException(429, f"Daily budget for team '{team}' would be exceeded "
-                                     f"(spent ${spent:.6g}, this call up to ${estimate:.6g}, budget ${budget:.6g}). "
-                                     "Resets at 00:00 UTC.")
-
-    meta = {"provider": provider_name, "requested_model": requested, "team": team,
-            "feature": clean_label(request.headers.get("x-feature"))}
-    start = time.perf_counter()
+            detail = (f"Daily budget for team '{team}' would be exceeded (spent ${spent:.6g}, "
+                      f"this call up to ${estimate:.6g}, budget ${budget:.6g}). Resets at 00:00 UTC.")
+            trace.add("budget", f"blocked: ${spent:.6g} spent + ${estimate:.6g} est > ${budget:.6g}", ok=False)
+            _record(trace, **meta, model=rt.model, priced=int(is_priced(rt.model)), input_tokens=0,
+                    output_tokens=0, cost_usd=0.0, saved_usd=0.0, routing_saved_usd=0.0,
+                    latency_ms=trace.total_ms, cache_hit=0, status=429, upstream="blocked")
+            raise _error(trace, 429, detail)
+        trace.add("budget", f"ok: ${spent:.6g} spent + ${estimate:.6g} est <= ${budget:.6g}")
+    else:
+        trace.add("estimate", f"up to ${estimate:.6g} (no budget set)")
 
     if body.get("stream"):
-        return await _proxy_stream(request, provider, url, headers, body, rt, meta, start, estimate)
+        return await _proxy_stream(request, provider, url, headers, body, rt, meta, trace, estimate)
 
     # Cache entries are scoped to the upstream credential so answers never leak across API keys.
     key = hashlib.sha256(
         (provider_name + credential_fingerprint(headers) + json.dumps(body, sort_keys=True)).encode()).hexdigest()
-    if _cacheable(body):
+    cacheable = _cacheable(body)
+    if cacheable:
+        t = trace.now_ms()
         cached = db.get_cached(key, CACHE_TTL_SECONDS)
         if cached is not None:
             u = provider.usage(cached)
-            db.log_call(**meta, model=rt.model, priced=int(is_priced(rt.model)), input_tokens=u.input,
-                        output_tokens=u.output, reasoning_tokens=u.reasoning, cost_usd=0.0,
-                        saved_usd=cost_usd(rt.model, u.input, u.output), routing_saved_usd=0.0,
-                        latency_ms=(time.perf_counter() - start) * 1000, cache_hit=1, status=200)
-            return JSONResponse(cached, headers=_guard_headers(rt, "hit", "cache", 0.0, estimate))
+            saved = cost_usd(rt.model, u.input, u.output)
+            trace.add("cache", f"hit: saved ${saved:.6f}", started_ms=t)
+            trace.add("result", _usage_detail(u, 0.0))
+            _record(trace, **meta, model=rt.model, priced=int(is_priced(rt.model)), input_tokens=u.input,
+                    output_tokens=u.output, reasoning_tokens=u.reasoning, cost_usd=0.0, saved_usd=saved,
+                    routing_saved_usd=0.0, latency_ms=trace.total_ms, cache_hit=1, status=200, upstream="cache")
+            return JSONResponse(cached, headers=_guard_headers(trace, rt, "hit", "cache", 0.0, estimate))
+        trace.add("cache", "miss", started_ms=t)
+    else:
+        trace.add("cache", "skipped (not deterministic)")
 
-    attempt, resp = await _send(request.app.state.client, _attempts(provider_name, url, headers, body), False)
-    latency = (time.perf_counter() - start) * 1000
+    try:
+        attempt, resp = await _send(request.app.state.client, _attempts(provider_name, url, headers, body),
+                                    False, trace)
+    except UpstreamsFailed as e:
+        _record(trace, **meta, model=rt.model, priced=int(is_priced(rt.model)), input_tokens=0, output_tokens=0,
+                cost_usd=0.0, saved_usd=0.0, routing_saved_usd=0.0, latency_ms=trace.total_ms, cache_hit=0,
+                status=502, upstream="none")
+        raise _error(trace, 502, f"All upstreams failed: {e}")
     try:
         data = resp.json()
     except ValueError:
@@ -304,36 +373,51 @@ async def _proxy(request: Request, provider_name: str, url: str, headers: dict) 
     usage, cost, routing_saved = Usage(), 0.0, 0.0
     if resp.status_code == 200:
         usage = provider.usage(data)
-        cost, routing_saved = _costs(used_model, rt.baseline, usage)
-        if _cacheable(body) and attempt.name == "primary":
+        # Routing savings compare cheap vs strong tier on the same provider; not meaningful after failover.
+        cost, routing_saved = _costs(used_model, rt.baseline if attempt.name == "primary" else None, usage)
+        if cacheable and attempt.name == "primary":
             db.put_cache(key, data)
+        detail = _usage_detail(usage, cost)
+        if routing_saved:
+            detail += f"; routing saved ${routing_saved:.6f}"
+        trace.add("result", detail)
+    else:
+        trace.add("result", f"HTTP {resp.status_code} from {attempt.name}", ok=False)
 
-    db.log_call(**meta, model=used_model, priced=int(is_priced(used_model)), input_tokens=usage.input,
-                output_tokens=usage.output, reasoning_tokens=usage.reasoning, cost_usd=cost, saved_usd=0.0,
-                routing_saved_usd=routing_saved, latency_ms=latency, cache_hit=0, status=resp.status_code,
-                upstream=attempt.name)
+    _record(trace, **meta, model=used_model, priced=int(is_priced(used_model)), input_tokens=usage.input,
+            output_tokens=usage.output, reasoning_tokens=usage.reasoning, cost_usd=cost, saved_usd=0.0,
+            routing_saved_usd=routing_saved, latency_ms=trace.total_ms, cache_hit=0, status=resp.status_code,
+            upstream=attempt.name)
     out_rt = Route(model=used_model, reason=rt.reason)
     return JSONResponse(data, status_code=resp.status_code,
-                        headers=_guard_headers(out_rt, "miss", attempt.name, cost, estimate))
+                        headers=_guard_headers(trace, out_rt, "miss", attempt.name, cost, estimate))
 
 
 async def _proxy_stream(request: Request, provider: Provider, url: str, headers: dict, body: dict,
-                        rt: Route, meta: dict, start: float, estimate: float) -> Response:
+                        rt: Route, meta: dict, trace: Trace, estimate: float) -> Response:
     if provider.name == "openai":
         # Ask for token usage in the final chunk so we can price the call.
         body.setdefault("stream_options", {"include_usage": True})
+    trace.add("cache", "skipped (streaming)")
 
-    attempt, resp = await _send(request.app.state.client, _attempts(provider.name, url, headers, body), True)
+    try:
+        attempt, resp = await _send(request.app.state.client, _attempts(provider.name, url, headers, body),
+                                    True, trace)
+    except UpstreamsFailed as e:
+        _record(trace, **meta, model=rt.model, priced=int(is_priced(rt.model)), input_tokens=0, output_tokens=0,
+                cost_usd=0.0, saved_usd=0.0, routing_saved_usd=0.0, latency_ms=trace.total_ms, cache_hit=0,
+                status=502, upstream="none", streamed=1)
+        raise _error(trace, 502, f"All upstreams failed: {e}")
     used_model = attempt.body["model"]
     log_base = dict(**meta, model=used_model, priced=int(is_priced(used_model)), upstream=attempt.name, streamed=1)
 
     if resp.status_code != 200:
         content = await resp.aread()
         await resp.aclose()
-        db.log_call(**log_base, input_tokens=0, output_tokens=0, cost_usd=0.0, saved_usd=0.0,
-                    routing_saved_usd=0.0, latency_ms=(time.perf_counter() - start) * 1000,
-                    cache_hit=0, status=resp.status_code)
-        return Response(content, status_code=resp.status_code,
+        trace.add("result", f"HTTP {resp.status_code} from {attempt.name}", ok=False)
+        _record(trace, **log_base, input_tokens=0, output_tokens=0, cost_usd=0.0, saved_usd=0.0,
+                routing_saved_usd=0.0, latency_ms=trace.total_ms, cache_hit=0, status=resp.status_code)
+        return Response(content, status_code=resp.status_code, headers={"x-request-id": trace.request_id},
                         media_type=resp.headers.get("content-type", "application/json"))
 
     usage = Usage()
@@ -341,6 +425,7 @@ async def _proxy_stream(request: Request, provider: Provider, url: str, headers:
     async def relay() -> AsyncIterator[bytes]:
         decoder = codecs.getincrementaldecoder("utf-8")()
         buf = ""
+        started = trace.now_ms()
         try:
             async for chunk in resp.aiter_bytes():
                 yield chunk  # pass bytes through untouched
@@ -357,15 +442,16 @@ async def _proxy_stream(request: Request, provider: Provider, url: str, headers:
             await resp.aclose()
             if not usage.reasoning:
                 usage.reasoning = min(_reasoning_text_tokens(usage.reasoning_chars), usage.output)
-            cost, routing_saved = _costs(used_model, rt.baseline, usage)
-            db.log_call(**log_base, input_tokens=usage.input, output_tokens=usage.output,
-                        reasoning_tokens=usage.reasoning, cost_usd=cost, saved_usd=0.0,
-                        routing_saved_usd=routing_saved, latency_ms=(time.perf_counter() - start) * 1000,
-                        cache_hit=0, status=200)
+            cost, routing_saved = _costs(used_model, rt.baseline if attempt.name == "primary" else None, usage)
+            trace.add("stream", "relayed to caller", started_ms=started)
+            trace.add("result", _usage_detail(usage, cost))
+            _record(trace, **log_base, input_tokens=usage.input, output_tokens=usage.output,
+                    reasoning_tokens=usage.reasoning, cost_usd=cost, saved_usd=0.0,
+                    routing_saved_usd=routing_saved, latency_ms=trace.total_ms, cache_hit=0, status=200)
 
     out_rt = Route(model=used_model, reason=rt.reason)
     return StreamingResponse(relay(), media_type="text/event-stream",
-                             headers=_guard_headers(out_rt, "bypass", attempt.name, estimate=estimate))
+                             headers=_guard_headers(trace, out_rt, "bypass", attempt.name, estimate=estimate))
 
 
 # ---------- routes ----------
@@ -393,7 +479,31 @@ def get_stats(request: Request):
         {"team": t, "budget_usd": b, "spent_today_usd": round(spent.get(t, 0.0), 6)}
         for t, b in sorted(request.app.state.budgets.items())
     ]
+    s["insights"] = db.insights()
     return s
+
+
+@app.get("/calls", dependencies=[Depends(require_dashboard_login)])
+def list_calls(limit: int = 50):
+    return {"calls": db.recent_calls(limit)}
+
+
+@app.get("/calls/{request_id}", dependencies=[Depends(require_dashboard_login)])
+def get_call(request_id: str):
+    call = db.get_call(request_id)
+    if call is None:
+        raise HTTPException(404, "No call with that request ID")
+    return call
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(request: Request):
+    token = os.getenv("METRICS_TOKEN", "")
+    if token:
+        supplied = request.headers.get("authorization", "")
+        if not hmac.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
+            raise HTTPException(401, "Missing or invalid metrics token")
+    return PlainTextResponse(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health")

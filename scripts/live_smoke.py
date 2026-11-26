@@ -41,9 +41,35 @@ def main() -> int:
     check("repeat -> cache hit", h2.get("x-cost-guard-cache") == "hit", h2.get("x-cost-guard-cache", ""))
     check("complex prompt -> strong model", m3.endswith("120b"), m3)
 
+    # Reasoning control: a simple prompt on the cheap tier should stay short (it was ~227 output tokens
+    # before low reasoning effort; ~63 after). A generous bound so normal variation doesn't flake.
+    rid = h1.get("x-request-id", "")
+    with urllib.request.urlopen(f"{BASE}/calls/{rid}", timeout=10) as resp:  # noqa: S310
+        traced = json.loads(resp.read())
+    route = next((s["detail"] for s in traced["trace"] if s["step"] == "route"), "")
+    check("trace recorded", len(traced["trace"]) >= 5, f"{len(traced['trace'])} steps")
+    check("low reasoning effort applied", "reasoning_effort=low" in route, route)
+    check("cheap answer stays short", traced["output_tokens"] < 200, f"{traced['output_tokens']} output tokens")
+
+    sbody = json.dumps({"model": "auto", "stream": True,
+                        "messages": [{"role": "user", "content": "Count to three."}]}).encode()
+    sreq = urllib.request.Request(  # noqa: S310 (scheme checked above)
+        f"{BASE}/openai/v1/chat/completions", data=sbody, method="POST",
+        headers={"Content-Type": "application/json", "X-Team": "ci", "X-Feature": "stream"})
+    with urllib.request.urlopen(sreq, timeout=120) as resp:  # noqa: S310
+        stream_text = resp.read().decode()
+        stream_rid = resp.headers.get("x-request-id", "")
+    with urllib.request.urlopen(f"{BASE}/calls/{stream_rid}", timeout=10) as resp:  # noqa: S310
+        streamed = json.loads(resp.read())
+    check("streaming relays chunks", stream_text.count("data:") > 2, f"{stream_text.count('data:')} chunks")
+    check("streamed call priced", streamed["cost_usd"] > 0, f"${streamed['cost_usd']:.6f}")
+
+    with urllib.request.urlopen(f"{BASE}/metrics", timeout=10) as resp:  # noqa: S310
+        check("prometheus metrics", b"costguard_requests_total" in resp.read(), "/metrics")
+
     with urllib.request.urlopen(f"{BASE}/stats", timeout=10) as resp:  # noqa: S310
         t = json.loads(resp.read())["totals"]
-    check("calls logged", t["calls"] == 3, str(t["calls"]))
+    check("calls logged", t["calls"] == 4, str(t["calls"]))
     summary = (f"Spend ${t['cost_usd']:.6f} · saved by cache ${t['saved_usd']:.6f} · "
                f"saved by routing ${t['routing_saved_usd']:.6f} · output tokens {t['output_tokens']} "
                f"(reasoning {t['reasoning_tokens']})")

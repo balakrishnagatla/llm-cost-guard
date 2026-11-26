@@ -45,9 +45,20 @@ First real test against Groq: routing, caching and cost tracking all worked, and
 - Defaults now target Groq's free tier, so the project runs at no cost out of the box
 - MIT license, dashboard screenshot, lint and type checks, coverage floor, Docker named volume
 
+## v0.5: See everything
+
+**Goal:** understand every call, not just totals.
+
+- **Per-call tracing:** request IDs, a step-by-step trace for every call (auth, route, budget, cache, each upstream attempt, result), a clickable "Recent calls" view
+- **Insights:** savings rate, spend over 24 hours, most expensive calls, cost per call by feature, reasoning share by model, p50/p95 latency, budget refusals and errors
+- **Prometheus metrics** and a ready-made **Grafana** dashboard
+- **OpenTelemetry** export (GenAI semantic conventions) to Jaeger or any OTLP backend
+- **Demo traffic generator:** free simulated mode with failover and budget scenarios, or real traffic through Groq
+- 54 tests (96% coverage); test reports on every CI run; live test now checks streaming, tracing and reasoning savings
+
 ## Quality bar
 
-- 31 automated tests (security, routing, reasoning control, budgets, failover, streaming); 92% coverage
+- 54 automated tests (security, routing, reasoning control, budgets, failover, streaming, tracing, metrics, upgrades); 96% coverage
 - Lint, type checks, dependency audit and static security scan on every pull request
 - Live test against the real provider on every merge to `main`
 - End-to-end test with every protection enabled, probing the gateway as an attacker would

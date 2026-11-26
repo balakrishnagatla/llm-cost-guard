@@ -6,6 +6,9 @@ services:
       # COST_GUARD_KEYS and DASHBOARD_PASSWORD first and put it behind HTTPS.
       - "127.0.0.1:8080:8080"
     env_file: .env
+    environment:
+      # Set to http://jaeger:4318 (with the observability profile) to export traces.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     volumes:
       # Named volume: works on Linux and macOS without host permission fixes
       - costguard-data:/srv/data
@@ -17,5 +20,42 @@ services:
       - ALL
     restart: unless-stopped
 
+  # ---- Observability (optional): docker compose --profile observability up -d ----
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    profiles: [observability]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/llm-cost-guard.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus]
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:2.11.0
+    profiles: [observability]
+    ports:
+      - "127.0.0.1:16686:16686"   # Jaeger UI
+    restart: unless-stopped
+
 volumes:
   costguard-data:
+  prometheus-data:
+  grafana-data:

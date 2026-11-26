@@ -22,6 +22,7 @@ your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini /
 | **Solution** | A small proxy: change one URL in your app, get cost tracking and savings |
 | **Savings levers** | Response cache, model routing, reasoning control, per-team budgets with pre-call estimates |
 | **Reliability** | Failover to backup providers on rate limits and outages |
+| **Observability** | Per-call traces, insights, Prometheus metrics, Grafana dashboard, OpenTelemetry export |
 | **Security** | Per-team keys, dashboard login, cache isolation, hardened container |
 | **Works with** | Any OpenAI-compatible API (OpenAI, Groq, Gemini, OpenRouter, Ollama) and Anthropic |
 | **Stack** | Python, FastAPI, SQLite, Docker, GitHub Actions |
@@ -34,7 +35,8 @@ your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini /
 1. [The Problem](The-Problem.md): why AI costs get out of hand, and why the usual stopgaps fall short
 2. [How It Works](How-It-Works.md): architecture and request flow
 3. [Results and Findings](Results.md): what a real test run showed
-4. [Security](Security.md): how the gateway protects keys, data and budgets
-5. [Getting Started](Getting-Started.md): run it in five minutes with a free API
-6. [Project History](Project-History.md): what was built, release by release
-7. [Roadmap](Roadmap.md): what comes next
+4. [Observability](Observability.md): traces, insights, Prometheus, Grafana and OpenTelemetry
+5. [Security](Security.md): how the gateway protects keys, data and budgets
+6. [Getting Started](Getting-Started.md): run it in five minutes with a free API
+7. [Project History](Project-History.md): what was built, release by release
+8. [Roadmap](Roadmap.md): what comes next
