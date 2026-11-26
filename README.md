@@ -115,7 +115,7 @@ LLM Cost Guard holds your provider API keys, so treat it like any other gateway.
 |---|---|
 | **Per-team proxy keys** | Set `COST_GUARD_KEYS=search:k_...,support:k_...`. Callers must send `X-Cost-Guard-Key`, and the team is taken from the key, so nobody can bill another team by faking `X-Team`. |
 | **Dashboard login** | Set `DASHBOARD_PASSWORD` to protect the dashboard and `/stats` (HTTP Basic auth). |
-| **Budgets** | `BUDGETS=search:5,support:2.50` caps daily spend per team (resets 00:00 UTC). Limits the damage from a leaked key or a runaway loop. |
+| **Budgets** | `BUDGETS=search:5,support:2.50` caps daily spend per team (resets 00:00 UTC). The check runs before each call, so a team can go over by at most one call. Limits the damage from a leaked key or a runaway loop. |
 | **Cache isolation** | Cached answers are scoped to the upstream API key, so one user never gets another's response. |
 | **Localhost only** | `docker-compose.yml` binds to `127.0.0.1`. Expose it only with keys, a password and HTTPS in front. |
 | **Hardened container** | Runs as a non-root user with all Linux capabilities dropped and `no-new-privileges`. |
