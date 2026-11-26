@@ -37,7 +37,10 @@ def init_db() -> None:
                 latency_ms REAL NOT NULL,
                 cache_hit INTEGER NOT NULL,
                 status INTEGER NOT NULL,
-                priced INTEGER NOT NULL
+                priced INTEGER NOT NULL,
+                requested_model TEXT NOT NULL DEFAULT '',
+                routing_saved_usd REAL NOT NULL DEFAULT 0,
+                streamed INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS cache (
                 key TEXT PRIMARY KEY,
@@ -46,6 +49,15 @@ def init_db() -> None:
             );
             """
         )
+        # Upgrade databases created by v0.1
+        existing = {r["name"] for r in _db().execute("PRAGMA table_info(calls)")}
+        for col, ddl in [
+            ("requested_model", "TEXT NOT NULL DEFAULT ''"),
+            ("routing_saved_usd", "REAL NOT NULL DEFAULT 0"),
+            ("streamed", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if col not in existing:
+                _db().execute(f"ALTER TABLE calls ADD COLUMN {col} {ddl}")
         _db().commit()
 
 
@@ -81,7 +93,8 @@ def stats() -> dict:
             rows = _db().execute(
                 f"""SELECT {col} AS name, COUNT(*) AS calls,
                            SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-                           ROUND(SUM(cost_usd), 6) AS cost_usd, ROUND(SUM(saved_usd), 6) AS saved_usd
+                           ROUND(SUM(cost_usd), 6) AS cost_usd, ROUND(SUM(saved_usd), 6) AS saved_usd,
+                           ROUND(SUM(routing_saved_usd), 6) AS routing_saved_usd
                     FROM calls GROUP BY {col} ORDER BY cost_usd DESC"""
             ).fetchall()
         return [dict(r) for r in rows]
@@ -92,6 +105,9 @@ def stats() -> dict:
                       COALESCE(SUM(cache_hit), 0) AS cache_hits,
                       ROUND(COALESCE(SUM(cost_usd), 0), 6) AS cost_usd,
                       ROUND(COALESCE(SUM(saved_usd), 0), 6) AS saved_usd,
+                      ROUND(COALESCE(SUM(routing_saved_usd), 0), 6) AS routing_saved_usd,
+                      COALESCE(SUM(CASE WHEN requested_model = 'auto' THEN 1 ELSE 0 END), 0) AS routed_calls,
+                      COALESCE(SUM(streamed), 0) AS streamed_calls,
                       ROUND(COALESCE(AVG(latency_ms), 0), 1) AS avg_latency_ms,
                       COALESCE(SUM(CASE WHEN priced = 0 THEN 1 ELSE 0 END), 0) AS unpriced_calls
                FROM calls"""
