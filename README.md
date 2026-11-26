@@ -11,6 +11,8 @@ your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini /
                  └─ dashboard at http://localhost:8080
 ```
 
+**📖 Full documentation: [docs/Home.md](docs/Home.md)** (the problem, how it works, test results, security, roadmap). Also published to the [project wiki](https://github.com/balakrishnagatla/llm-cost-guard/wiki).
+
 ## Features (v0.3)
 
 - OpenAI-compatible endpoint (works with OpenAI, Groq, Gemini, OpenRouter, Ollama and other compatible APIs) and the Anthropic Messages API
