@@ -83,7 +83,7 @@ The dashboard shows **Saved by routing (est.)**: what the same tokens would have
 For Groq, set the models in `routing.json` to Groq model IDs, for example:
 
 ```json
-"openai": { "cheap": "llama-3.1-8b-instant", "strong": "llama-3.3-70b-versatile" }
+"openai": { "cheap": "openai/gpt-oss-20b", "strong": "openai/gpt-oss-120b" }
 ```
 
 (Groq's model list changes, so check console.groq.com/docs/models.)
