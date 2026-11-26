@@ -58,15 +58,46 @@ def init_db() -> None:
         ]:
             if col not in existing:
                 _db().execute(f"ALTER TABLE calls ADD COLUMN {col} {ddl}")
+        _db().execute("CREATE INDEX IF NOT EXISTS idx_calls_team_ts ON calls (team, ts)")
         _db().commit()
+
+
+def _start_of_today_utc() -> float:
+    now = time.time()
+    return now - (now % 86400)
+
+
+def spent_today(team: str) -> float:
+    with _lock:
+        r = _db().execute("SELECT COALESCE(SUM(cost_usd), 0) AS s FROM calls WHERE team = ? AND ts >= ?",
+                          (team, _start_of_today_utc())).fetchone()
+    return float(r["s"])
+
+
+def spent_today_by_team() -> dict:
+    with _lock:
+        rows = _db().execute("SELECT team, SUM(cost_usd) AS s FROM calls WHERE ts >= ? GROUP BY team",
+                             (_start_of_today_utc(),)).fetchall()
+    return {r["team"]: float(r["s"]) for r in rows}
+
+
+CALL_COLUMNS = frozenset({
+    "ts", "provider", "model", "team", "feature", "input_tokens", "output_tokens", "cost_usd",
+    "saved_usd", "latency_ms", "cache_hit", "status", "priced", "requested_model",
+    "routing_saved_usd", "streamed",
+})
+GROUP_COLUMNS = frozenset({"team", "feature", "model"})
 
 
 def log_call(**row) -> None:
     row.setdefault("ts", time.time())
-    cols = ", ".join(row)
+    unknown = set(row) - CALL_COLUMNS
+    if unknown:
+        raise ValueError(f"Unknown columns: {sorted(unknown)}")
+    cols = ", ".join(row)  # only names from CALL_COLUMNS; values are bound parameters
     marks = ", ".join("?" for _ in row)
     with _lock:
-        _db().execute(f"INSERT INTO calls ({cols}) VALUES ({marks})", tuple(row.values()))
+        _db().execute(f"INSERT INTO calls ({cols}) VALUES ({marks})", tuple(row.values()))  # nosec B608
         _db().commit()
 
 
@@ -89,13 +120,16 @@ def put_cache(key: str, response: dict) -> None:
 
 def stats() -> dict:
     def group(col: str):
+        # col is checked against an allowlist, so it is safe to put in the query
+        if col not in GROUP_COLUMNS:
+            raise ValueError(f"Can't group by {col}")
         with _lock:
             rows = _db().execute(
                 f"""SELECT {col} AS name, COUNT(*) AS calls,
                            SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
                            ROUND(SUM(cost_usd), 6) AS cost_usd, ROUND(SUM(saved_usd), 6) AS saved_usd,
                            ROUND(SUM(routing_saved_usd), 6) AS routing_saved_usd
-                    FROM calls GROUP BY {col} ORDER BY cost_usd DESC"""
+                    FROM calls GROUP BY {col} ORDER BY cost_usd DESC"""  # nosec B608
             ).fetchall()
         return [dict(r) for r in rows]
 
