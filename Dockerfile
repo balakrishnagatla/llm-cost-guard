@@ -3,7 +3,7 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
-COPY pricing.json .
+COPY pricing.json routing.json ./
 ENV DB_PATH=/srv/data/costguard.db
 EXPOSE 8080
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
