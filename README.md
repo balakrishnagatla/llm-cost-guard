@@ -1,21 +1,24 @@
 # LLM Cost Guard
 
-A small proxy that sits between your app and LLM APIs. It **tracks what every call costs, by team and feature**, and **caches repeat calls** so you don't pay twice for the same answer.
+A small proxy that sits between your app and LLM APIs. It **tracks what every call costs, by team and feature**, **caches repeat calls** so you don't pay twice for the same answer, and **routes simple prompts to cheaper models**.
 
 ```
 your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini / Ollama
                  │
                  ├─ logs tokens, cost, latency per team & feature
                  ├─ serves repeat calls from cache ($0)
+                 ├─ routes simple prompts to a cheaper model
                  └─ dashboard at http://localhost:8080
 ```
 
-## Features (v0.1)
+## Features (v0.2)
 
 - OpenAI-compatible endpoint (works with OpenAI, Groq, Gemini, OpenRouter, Ollama and other compatible APIs) and the Anthropic Messages API
 - Cost per call from an editable `pricing.json`
 - Tag calls with `X-Team` and `X-Feature` headers to see spend per team and feature
 - Response cache (by default only `temperature: 0` calls, which are safe to reuse)
+- Model routing with `"model": "auto"`: simple prompts go to a cheap model, complex ones to a strong model
+- Streaming (`"stream": true`) for both APIs, with token usage captured and priced
 - Live dashboard with spend, cache savings, hit rate and latency
 - `/stats` JSON endpoint for your own reporting
 
@@ -61,6 +64,34 @@ client = OpenAI(base_url="http://localhost:8080/openai/v1",
 
 Anthropic: `POST http://localhost:8080/anthropic/v1/messages` with your usual `x-api-key` header.
 
+## Model routing
+
+Send `"model": "auto"` and the proxy picks the model for you, using the rules in `routing.json`:
+
+- **Strong model** if the request uses tools, the prompt is longer than `max_cheap_prompt_chars`, or the last user message contains a keyword like "debug", "analyze" or "step by step"
+- **Cheap model** otherwise
+
+Requests that name a model are never rerouted. Each response tells you what happened:
+
+```
+x-cost-guard-model: gpt-4o-mini
+x-cost-guard-route-reason: short, simple prompt
+```
+
+The dashboard shows **Saved by routing (est.)**: what the same tokens would have cost on the strong model minus what they cost on the cheap one. It's an estimate, since different models use slightly different token counts.
+
+For Groq, set the models in `routing.json` to Groq model IDs, for example:
+
+```json
+"openai": { "cheap": "openai/gpt-oss-20b", "strong": "openai/gpt-oss-120b" }
+```
+
+(Groq's model list changes, so check console.groq.com/docs/models.)
+
+## Streaming
+
+Send `"stream": true` as usual. Chunks are passed straight through, and the proxy reads token usage from the stream to price the call. For OpenAI-compatible APIs it adds `stream_options.include_usage` automatically. Streamed calls are not cached.
+
 ## Use a free API for testing
 
 Set `OPENAI_BASE_URL` in `.env` to any OpenAI-compatible provider:
@@ -83,6 +114,7 @@ Free models cost $0, so to show realistic numbers in a demo, add the model to `p
 | `CACHE_MODE` | `deterministic` | `deterministic` (temperature 0 only), `all`, or `off` |
 | `CACHE_TTL_SECONDS` | `86400` | How long cached responses stay valid |
 | `DB_PATH` | `data/costguard.db` | SQLite file for logs and cache |
+| `ROUTING_PATH` | `routing.json` | Routing rules for `"model": "auto"` |
 
 Prices in `pricing.json` are examples (USD per 1M tokens). Check them against each provider's pricing page.
 
@@ -95,8 +127,8 @@ pytest
 
 ## Roadmap
 
-- [ ] Streaming responses
-- [ ] Model routing: send simple prompts to cheaper models
+- [x] Streaming responses
+- [x] Model routing: send simple prompts to cheaper models
 - [ ] Budgets and alerts per team
 - [ ] Semantic cache (similar prompts, not just identical ones)
 - [ ] Prometheus metrics and a Grafana dashboard
@@ -104,4 +136,4 @@ pytest
 ## Notes
 
 - The cache is shared by everyone using the proxy. Run one proxy per trust boundary.
-- Streaming isn't supported yet. Requests with `"stream": true` return 400.
+- Never commit your `.env` file or API keys. `.gitignore` already excludes `.env`.

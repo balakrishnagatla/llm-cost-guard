@@ -7,3 +7,4 @@ services:
     volumes:
       - ./data:/srv/data
       - ./pricing.json:/srv/pricing.json:ro
+      - ./routing.json:/srv/routing.json:ro

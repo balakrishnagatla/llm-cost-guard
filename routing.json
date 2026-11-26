@@ -1,0 +1,12 @@
+{
+  "_note": "Used when a request sets \"model\": \"auto\". Simple prompts go to 'cheap', complex ones to 'strong'. Change the model IDs to match your provider (see README for Groq).",
+  "max_cheap_prompt_chars": 2000,
+  "strong_keywords": [
+    "analyze", "analyse", "step by step", "prove", "debug", "refactor",
+    "write code", "architecture", "compare", "explain why", "reason"
+  ],
+  "providers": {
+    "openai": { "cheap": "gpt-4o-mini", "strong": "gpt-4o" },
+    "anthropic": { "cheap": "claude-haiku-4-5", "strong": "claude-sonnet-4-5" }
+  }
+}
