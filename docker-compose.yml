@@ -1,0 +1,9 @@
+services:
+  cost-guard:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - ./data:/srv/data
+      - ./pricing.json:/srv/pricing.json:ro

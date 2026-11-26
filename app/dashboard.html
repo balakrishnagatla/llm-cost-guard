@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LLM Cost Guard</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; background: #fafafa; }
+  h1 { margin-bottom: .25rem; }
+  .sub { color: #666; margin-top: 0; }
+  .tiles { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1.5rem 0; }
+  .tile { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 1rem 1.25rem; min-width: 150px; }
+  .tile .v { font-size: 1.6rem; font-weight: 600; }
+  .tile .l { color: #666; font-size: .85rem; }
+  .saved .v { color: #137333; }
+  table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 2rem; }
+  th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid #eee; }
+  th { background: #f3f3f3; font-weight: 600; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .warn { color: #b06000; }
+</style>
+</head>
+<body>
+<h1>LLM Cost Guard</h1>
+<p class="sub">Spend by team, feature and model. Refreshes every 10 seconds.</p>
+<div class="tiles" id="tiles"></div>
+<div id="tables"></div>
+<script>
+const usd = v => '$' + Number(v || 0).toFixed(4);
+const num = v => Number(v || 0).toLocaleString();
+function tile(label, value, cls = '') {
+  return `<div class="tile ${cls}"><div class="v">${value}</div><div class="l">${label}</div></div>`;
+}
+function table(title, rows) {
+  if (!rows.length) return '';
+  const body = rows.map(r => `<tr><td>${r.name}</td><td class="n">${num(r.calls)}</td>
+    <td class="n">${num(r.input_tokens)}</td><td class="n">${num(r.output_tokens)}</td>
+    <td class="n">${usd(r.cost_usd)}</td><td class="n">${usd(r.saved_usd)}</td></tr>`).join('');
+  return `<h2>${title}</h2><table><tr><th>Name</th><th>Calls</th><th>Input tokens</th>
+    <th>Output tokens</th><th>Cost</th><th>Saved by cache</th></tr>${body}</table>`;
+}
+async function load() {
+  const s = await (await fetch('/stats')).json();
+  const t = s.totals;
+  const hitRate = t.calls ? Math.round(100 * t.cache_hits / t.calls) + '%' : '0%';
+  document.getElementById('tiles').innerHTML =
+    tile('Total spend', usd(t.cost_usd)) +
+    tile('Saved by cache', usd(t.saved_usd), 'saved') +
+    tile('Calls', num(t.calls)) +
+    tile('Cache hit rate', hitRate) +
+    tile('Avg latency', t.avg_latency_ms + ' ms') +
+    (t.unpriced_calls ? tile('Calls with no price set', num(t.unpriced_calls), 'warn') : '');
+  document.getElementById('tables').innerHTML =
+    table('By team', s.by_team) + table('By feature', s.by_feature) + table('By model', s.by_model);
+}
+load(); setInterval(load, 10000);
+</script>
+</body>
+</html>
