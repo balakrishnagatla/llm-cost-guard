@@ -67,6 +67,13 @@ cd llm-cost-guard && git pull && docker compose up -d --build
 
 Since v0.4, data is kept in a Docker named volume (`costguard-data`), so there are no folder permission issues on Linux. Data in the old `./data` folder isn't carried over.
 
-## 5. Optional: failover
+## 5. Optional: see more
+
+- **Fill the dashboard with demo data** (free, no key): `pip install -r requirements.txt && python scripts/demo_traffic.py`, then open http://localhost:8090
+- **Grafana, Prometheus and Jaeger:** `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile observability up -d --build`, then open http://localhost:3000 (Grafana) and http://localhost:16686 (Jaeger)
+
+See [Observability](Observability.md) for details.
+
+## 6. Optional: failover
 
 Add a backup provider so calls keep working when Groq rate-limits you. Get a free Gemini key at aistudio.google.com, set `GEMINI_API_KEY` in `.env`, and copy the `_fallbacks_example` block in `routing.json` into `fallbacks`.

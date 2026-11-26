@@ -42,7 +42,7 @@ client = OpenAI(base_url="http://localhost:8080/openai/v1",
 4. **Cache.** Identical deterministic requests (`temperature: 0`) are answered from the cache at no cost. Cache entries are tied to the caller's API key, so answers never cross users.
 5. **Forward, with failover.** The request goes to the provider. If it answers 429 or 5xx, or can't be reached, the gateway retries on the backup providers listed under `fallbacks` in `routing.json`, mapping the model name. Streaming responses are passed through chunk by chunk.
 6. **Price.** Token counts from the provider's response are multiplied by prices in `pricing.json`. Reasoning tokens are recorded separately; when a provider reports 0 but returns reasoning text (Groq does this), they're estimated from that text.
-7. **Log.** Every call is recorded with team, feature, model, upstream, tokens, reasoning tokens, cost, latency and how much the cache or routing saved.
+7. **Log and trace.** Every call is recorded with team, feature, model, upstream, tokens, reasoning tokens, cost, latency and how much the cache or routing saved, plus a trace of each step above with timings. The call's ID comes back in the `x-request-id` header. Metrics go to `/metrics` for Prometheus, and traces can be exported with OpenTelemetry. See [Observability](Observability.md).
 
 ## Components
 
@@ -52,7 +52,8 @@ client = OpenAI(base_url="http://localhost:8080/openai/v1",
 | Routing | `app/router.py` + `routing.json` | Picks cheap vs strong model, tier settings, fallbacks |
 | Pricing | `app/pricing.py` + `pricing.json` | USD per million tokens per model |
 | Security | `app/security.py` | Keys, dashboard login, budgets, input cleaning |
-| Storage | `app/db.py` | Call log and cache in SQLite |
+| Observability | `app/observability.py` | Traces, Prometheus metrics, OpenTelemetry export |
+| Storage | `app/db.py` | Call log, traces, insights and cache in SQLite |
 | Dashboard | `app/dashboard.html` | Live spend, savings, budgets |
 
 ## How savings are measured

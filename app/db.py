@@ -42,7 +42,9 @@ def init_db() -> None:
                 routing_saved_usd REAL NOT NULL DEFAULT 0,
                 streamed INTEGER NOT NULL DEFAULT 0,
                 reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-                upstream TEXT NOT NULL DEFAULT 'primary'
+                upstream TEXT NOT NULL DEFAULT 'primary',
+                request_id TEXT NOT NULL DEFAULT '',
+                trace TEXT NOT NULL DEFAULT '[]'
             );
             CREATE TABLE IF NOT EXISTS cache (
                 key TEXT PRIMARY KEY,
@@ -59,10 +61,13 @@ def init_db() -> None:
             ("streamed", "INTEGER NOT NULL DEFAULT 0"),
             ("reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("upstream", "TEXT NOT NULL DEFAULT 'primary'"),
+            ("request_id", "TEXT NOT NULL DEFAULT ''"),
+            ("trace", "TEXT NOT NULL DEFAULT '[]'"),
         ]:
             if col not in existing:
                 _db().execute(f"ALTER TABLE calls ADD COLUMN {col} {ddl}")
         _db().execute("CREATE INDEX IF NOT EXISTS idx_calls_team_ts ON calls (team, ts)")
+        _db().execute("CREATE INDEX IF NOT EXISTS idx_calls_request_id ON calls (request_id)")
         _db().commit()
 
 
@@ -88,7 +93,7 @@ def spent_today_by_team() -> dict:
 CALL_COLUMNS = frozenset({
     "ts", "provider", "model", "team", "feature", "input_tokens", "output_tokens", "cost_usd",
     "saved_usd", "latency_ms", "cache_hit", "status", "priced", "requested_model",
-    "routing_saved_usd", "streamed", "reasoning_tokens", "upstream",
+    "routing_saved_usd", "streamed", "reasoning_tokens", "upstream", "request_id", "trace",
 })
 GROUP_COLUMNS = frozenset({"team", "feature", "model"})
 
@@ -149,9 +154,97 @@ def stats() -> dict:
                       COALESCE(SUM(streamed), 0) AS streamed_calls,
                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
                       COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
-                      COALESCE(SUM(CASE WHEN upstream != 'primary' THEN 1 ELSE 0 END), 0) AS fallback_calls,
+                      COALESCE(SUM(CASE WHEN upstream NOT IN ('primary', 'cache', 'blocked', 'none')
+                                        THEN 1 ELSE 0 END), 0) AS fallback_calls,
                       ROUND(COALESCE(AVG(latency_ms), 0), 1) AS avg_latency_ms,
                       COALESCE(SUM(CASE WHEN priced = 0 THEN 1 ELSE 0 END), 0) AS unpriced_calls
                FROM calls"""
         ).fetchone()
     return {"totals": dict(t), "by_team": group("team"), "by_feature": group("feature"), "by_model": group("model")}
+
+
+# ---------- tracing and insights ----------
+
+_SUMMARY_COLS = ("ts, request_id, team, feature, model, requested_model, upstream, status, cache_hit, streamed, "
+                 "input_tokens, output_tokens, reasoning_tokens, cost_usd, saved_usd, routing_saved_usd, latency_ms")
+
+
+def recent_calls(limit: int = 50) -> list[dict]:
+    with _lock:
+        rows = _db().execute(f"SELECT {_SUMMARY_COLS} FROM calls ORDER BY id DESC LIMIT ?",  # nosec B608
+                             (max(1, min(limit, 500)),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_call(request_id: str) -> dict | None:
+    with _lock:
+        r = _db().execute(f"SELECT {_SUMMARY_COLS}, trace FROM calls WHERE request_id = ?",  # nosec B608
+                          (request_id,)).fetchone()
+    if r is None:
+        return None
+    row = dict(r)
+    row["trace"] = json.loads(row["trace"] or "[]")
+    return row
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    values = sorted(values)
+    k = max(0, min(len(values) - 1, round(pct / 100 * (len(values) - 1))))
+    return round(values[k], 1)
+
+
+def insights(hours: int = 24) -> dict:
+    """Derived numbers for the dashboard: savings rate, top calls, trends, latency."""
+    since = time.time() - hours * 3600
+    with _lock:
+        rows = [dict(r) for r in _db().execute(
+            "SELECT ts, request_id, team, feature, model, upstream, status, cost_usd, saved_usd, "
+            "routing_saved_usd, output_tokens, reasoning_tokens, latency_ms, cache_hit FROM calls WHERE ts >= ?",
+            (since,)).fetchall()]
+
+    served = [r for r in rows if r["upstream"] != "blocked"]
+    spend = sum(r["cost_usd"] for r in served)
+    saved = sum(r["saved_usd"] + r["routing_saved_usd"] for r in served)
+
+    by_feature: dict[str, list[float]] = {}
+    by_model_tokens: dict[str, list[int]] = {}
+    latency: dict[str, list[float]] = {}
+    for r in served:
+        if r["status"] == 200 and not r["cache_hit"]:
+            by_feature.setdefault(r["feature"], []).append(r["cost_usd"])
+            t = by_model_tokens.setdefault(r["model"], [0, 0])
+            t[0] += r["output_tokens"]
+            t[1] += r["reasoning_tokens"]
+            latency.setdefault(r["upstream"], []).append(r["latency_ms"])
+
+    hourly: dict[int, dict] = {}
+    for r in served:
+        h = int(r["ts"] // 3600 * 3600)
+        b = hourly.setdefault(h, {"hour": h, "calls": 0, "cost_usd": 0.0, "saved_usd": 0.0})
+        b["calls"] += 1
+        b["cost_usd"] += r["cost_usd"]
+        b["saved_usd"] += r["saved_usd"] + r["routing_saved_usd"]
+
+    top = sorted((r for r in served if r["cost_usd"] > 0), key=lambda r: r["cost_usd"], reverse=True)[:5]
+    return {
+        "window_hours": hours,
+        "savings_rate": round(saved / (spend + saved), 4) if spend + saved else 0.0,
+        "blocked_calls": sum(1 for r in rows if r["upstream"] == "blocked"),
+        "error_calls": sum(1 for r in served if r["status"] >= 400),
+        "top_calls": [{k: r[k] for k in ("request_id", "team", "feature", "model", "cost_usd", "output_tokens")}
+                      for r in top],
+        "cost_per_call_by_feature": sorted(
+            ({"feature": f, "calls": len(v), "avg_cost_usd": round(sum(v) / len(v), 8)} for f, v in by_feature.items()),
+            key=lambda x: x["avg_cost_usd"], reverse=True),
+        "reasoning_share_by_model": sorted(
+            ({"model": m, "output_tokens": o, "reasoning_tokens": rt, "share": round(rt / o, 4) if o else 0.0}
+             for m, (o, rt) in by_model_tokens.items()),
+            key=lambda x: x["share"], reverse=True),
+        "latency_by_upstream": [
+            {"upstream": u, "calls": len(v), "p50_ms": _percentile(v, 50), "p95_ms": _percentile(v, 95)}
+            for u, v in sorted(latency.items())],
+        "hourly": [{**b, "cost_usd": round(b["cost_usd"], 8), "saved_usd": round(b["saved_usd"], 8)}
+                   for _, b in sorted(hourly.items())],
+    }

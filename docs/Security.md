@@ -17,6 +17,7 @@ The gateway holds provider API keys and sees every prompt, so it's treated as se
 | Accidental exposure on a network | Docker binds to `127.0.0.1` only; API docs endpoints are disabled |
 | Container breakout impact | Non-root user, all Linux capabilities dropped, `no-new-privileges` |
 | Backup provider keys leaking to callers | Failover keys are read server-side from the environment and never returned |
+| Spend data leaking through monitoring | `/calls` and `/stats` need the dashboard password; `/metrics` can require `METRICS_TOKEN`; Prometheus, Grafana and Jaeger bind to localhost only; prompts and answers are never put in traces or metrics |
 
 ## Repository protections
 
