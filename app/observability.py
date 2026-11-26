@@ -86,6 +86,24 @@ def register_budget_collector(budgets_fn, spent_fn) -> None:
         _budget_collector.budgets_fn, _budget_collector.spent_fn = budgets_fn, spent_fn
 
 
+def seed_counters(rows: list[dict]) -> None:
+    """Start counters from the all-time totals in the database, so Grafana keeps its history across
+    restarts (the counters keep growing instead of resetting to zero)."""
+    for r in rows:
+        upstream = r["upstream"]
+        cache = "hit" if r["cache_hit"] else "miss"
+        REQUESTS.labels(r["team"], r["feature"], r["model"], upstream, str(r["status"]), cache).inc(r["calls"])
+        if r["cost_usd"]:
+            COST.labels(r["team"], r["feature"], r["model"]).inc(r["cost_usd"])
+        if r["saved_usd"]:
+            SAVED.labels(r["team"], "cache").inc(r["saved_usd"])
+        if r["routing_saved_usd"]:
+            SAVED.labels(r["team"], "routing").inc(r["routing_saved_usd"])
+        for kind in ("input", "output", "reasoning"):
+            if r[f"{kind}_tokens"]:
+                TOKENS.labels(r["model"], kind).inc(r[f"{kind}_tokens"])
+
+
 def record_metrics(row: dict) -> None:
     upstream = row.get("upstream", "primary")
     cache = "hit" if row.get("cache_hit") else "miss"

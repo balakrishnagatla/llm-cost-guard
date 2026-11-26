@@ -31,6 +31,7 @@ from .observability import (
     init_tracing,
     record_metrics,
     register_budget_collector,
+    seed_counters,
 )
 from .pricing import cost_usd, estimate_tokens, is_priced
 from .router import Route, fallbacks_for, prompt_text, route
@@ -69,6 +70,9 @@ async def lifespan(app: FastAPI):
     if not os.getenv("DASHBOARD_PASSWORD"):
         log.warning("DASHBOARD_PASSWORD is not set: dashboard and /stats are not password protected.")
     register_budget_collector(lambda: app.state.budgets, db.spent_today_by_team)
+    if not getattr(app.state, "counters_seeded", False):
+        seed_counters(db.totals_for_metrics())
+        app.state.counters_seeded = True
     init_tracing()
     app.state.client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
     yield

@@ -115,7 +115,15 @@ def test_insights(client, upstream, monkeypatch):
     assert all(m["share"] == 0.8 for m in i["reasoning_share_by_model"])  # 400 of 500
     assert i["latency_by_upstream"][0]["upstream"] == "primary"
     assert i["latency_by_upstream"][0]["calls"] == 2  # cache hits excluded
-    assert len(i["hourly"]) == 1 and i["hourly"][0]["calls"] == 3
+    tl = i["timeline"]
+    assert tl["bucket_seconds"] == 30  # brand-new data -> 30-second detail over the last 15 minutes
+    assert len(tl["points"]) == 30  # empty buckets included
+    assert sum(p["calls"] for p in tl["points"]) == 3
+    assert i["strong_model_share"] == 1.0  # the one routed, non-cached call went to the strong tier
+    assert i["projected_monthly_usd"] > 0
+    assert i["cost_per_1k_tokens_usd"] > 0
+    chat_cache = next(f for f in i["cache_hit_rate_by_feature"] if f["feature"] == "chat")
+    assert chat_cache == {"feature": "chat", "calls": 2, "hit_rate": 0.5}
 
 
 # ---------- Prometheus ----------
@@ -201,3 +209,17 @@ def test_spans_are_exported_with_genai_attributes(client, spans, upstream, monke
 def test_tracing_is_off_by_default(monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     assert observability.init_tracing() is False
+
+
+def test_counters_are_seeded_from_history(client):
+    """After a restart, Prometheus counters continue from the database totals instead of zero."""
+    from app import db
+    from app.observability import seed_counters
+
+    client.post(OPENAI, json=chat("hi", model="gpt-4o-mini"), headers={"X-Team": "seed-team"})
+    rows = [r for r in db.totals_for_metrics() if r["team"] == "seed-team"]
+    assert rows and rows[0]["calls"] == 1
+    labels = {"team": "seed-team", "feature": "unknown", "model": "gpt-4o-mini"}
+    before = metric("costguard_cost_usd_total", **labels)
+    seed_counters(rows)  # what startup does with the stored history
+    assert abs(metric("costguard_cost_usd_total", **labels) - before - 0.00045) < 1e-9
