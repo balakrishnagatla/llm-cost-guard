@@ -11,7 +11,7 @@ your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini /
                  └─ dashboard at http://localhost:8080
 ```
 
-## Features (v0.2)
+## Features (v0.3)
 
 - OpenAI-compatible endpoint (works with OpenAI, Groq, Gemini, OpenRouter, Ollama and other compatible APIs) and the Anthropic Messages API
 - Cost per call from an editable `pricing.json`
@@ -19,6 +19,8 @@ your app ──► LLM Cost Guard ──► OpenAI / Anthropic / Groq / Gemini /
 - Response cache (by default only `temperature: 0` calls, which are safe to reuse)
 - Model routing with `"model": "auto"`: simple prompts go to a cheap model, complex ones to a strong model
 - Streaming (`"stream": true`) for both APIs, with token usage captured and priced
+- **Per-team daily budgets**: calls get HTTP 429 once a team hits its limit
+- **Security built in**: per-team proxy keys, dashboard login, per-key cache isolation, localhost-only by default (see [Security](#security))
 - Live dashboard with spend, cache savings, hit rate and latency
 - `/stats` JSON endpoint for your own reporting
 
@@ -105,6 +107,38 @@ Set `OPENAI_BASE_URL` in `.env` to any OpenAI-compatible provider:
 
 Free models cost $0, so to show realistic numbers in a demo, add the model to `pricing.json` with the price of the paid model it would replace.
 
+## Security
+
+LLM Cost Guard holds your provider API keys, so treat it like any other gateway.
+
+| Protection | How |
+|---|---|
+| **Per-team proxy keys** | Set `COST_GUARD_KEYS=search:k_...,support:k_...`. Callers must send `X-Cost-Guard-Key`, and the team is taken from the key, so nobody can bill another team by faking `X-Team`. |
+| **Dashboard login** | Set `DASHBOARD_PASSWORD` to protect the dashboard and `/stats` (HTTP Basic auth). |
+| **Budgets** | `BUDGETS=search:5,support:2.50` caps daily spend per team (resets 00:00 UTC). Limits the damage from a leaked key or a runaway loop. |
+| **Cache isolation** | Cached answers are scoped to the upstream API key, so one user never gets another's response. |
+| **Localhost only** | `docker-compose.yml` binds to `127.0.0.1`. Expose it only with keys, a password and HTTPS in front. |
+| **Hardened container** | Runs as a non-root user with all Linux capabilities dropped and `no-new-privileges`. |
+| **Input limits** | Request bodies over `MAX_BODY_BYTES` are rejected; team/feature names are sanitized before they're stored or displayed. |
+| **Safe headers** | CSP, `X-Frame-Options: DENY`, `nosniff`; API docs endpoints are disabled. |
+
+Generate a proxy key:
+
+```bash
+python3 -c "import secrets; print('k_' + secrets.token_urlsafe(24))"
+```
+
+Call through a locked-down proxy:
+
+```bash
+curl http://localhost:8080/openai/v1/chat/completions \
+  -H "X-Cost-Guard-Key: k_your_team_key" -H "X-Feature: summarize" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "Say hello"}]}'
+```
+
+Every pull request runs the tests, a dependency vulnerability check (`pip-audit`), a static security scan (`bandit`) and a Docker build. See [SECURITY.md](SECURITY.md) to report a vulnerability.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -115,6 +149,10 @@ Free models cost $0, so to show realistic numbers in a demo, add the model to `p
 | `CACHE_TTL_SECONDS` | `86400` | How long cached responses stay valid |
 | `DB_PATH` | `data/costguard.db` | SQLite file for logs and cache |
 | `ROUTING_PATH` | `routing.json` | Routing rules for `"model": "auto"` |
+| `COST_GUARD_KEYS` | (empty = dev mode) | Per-team proxy keys, `team:key,...` |
+| `DASHBOARD_PASSWORD` | (empty = open) | Password for the dashboard and `/stats` |
+| `BUDGETS` | (empty) | Daily USD limit per team, `team:amount,...` |
+| `MAX_BODY_BYTES` | `1000000` | Largest request body accepted |
 
 Prices in `pricing.json` are examples (USD per 1M tokens). Check them against each provider's pricing page.
 
@@ -129,7 +167,8 @@ pytest
 
 - [x] Streaming responses
 - [x] Model routing: send simple prompts to cheaper models
-- [ ] Budgets and alerts per team
+- [x] Budgets per team
+- [ ] Budget alerts (Slack/email)
 - [ ] Semantic cache (similar prompts, not just identical ones)
 - [ ] Prometheus metrics and a Grafana dashboard
 

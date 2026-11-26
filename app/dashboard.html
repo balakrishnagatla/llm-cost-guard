@@ -17,6 +17,10 @@
   th { background: #f3f3f3; font-weight: 600; }
   td.n { text-align: right; font-variant-numeric: tabular-nums; }
   .warn { color: #b06000; }
+  .bar { background: #eee; border-radius: 4px; height: 10px; min-width: 160px; }
+  .fill { background: #137333; height: 10px; border-radius: 4px; }
+  .fill.warn { background: #e8a200; }
+  .fill.over { background: #c5221f; }
 </style>
 </head>
 <body>
@@ -25,22 +29,36 @@
 <div class="tiles" id="tiles"></div>
 <div id="tables"></div>
 <script>
-const usd = v => '$' + Number(v || 0).toFixed(4);
+// Escape anything that came from a request (team/feature/model names) before it touches innerHTML.
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const usd = v => { const n = Number(v || 0); return '$' + (n !== 0 && Math.abs(n) < 0.01 ? n.toFixed(6) : n.toFixed(4)); };
 const num = v => Number(v || 0).toLocaleString();
 function tile(label, value, cls = '') {
   return `<div class="tile ${cls}"><div class="v">${value}</div><div class="l">${label}</div></div>`;
 }
 function table(title, rows) {
   if (!rows.length) return '';
-  const body = rows.map(r => `<tr><td>${r.name}</td><td class="n">${num(r.calls)}</td>
+  const body = rows.map(r => `<tr><td>${esc(r.name)}</td><td class="n">${num(r.calls)}</td>
     <td class="n">${num(r.input_tokens)}</td><td class="n">${num(r.output_tokens)}</td>
     <td class="n">${usd(r.cost_usd)}</td><td class="n">${usd(r.saved_usd)}</td>
     <td class="n">${usd(r.routing_saved_usd)}</td></tr>`).join('');
-  return `<h2>${title}</h2><table><tr><th>Name</th><th>Calls</th><th>Input tokens</th>
+  return `<h2>${esc(title)}</h2><table><tr><th>Name</th><th>Calls</th><th>Input tokens</th>
     <th>Output tokens</th><th>Cost</th><th>Saved by cache</th><th>Saved by routing</th></tr>${body}</table>`;
 }
+function budgets(rows) {
+  if (!rows || !rows.length) return '';
+  const body = rows.map(b => {
+    const pct = b.budget_usd > 0 ? Math.min(100, 100 * b.spent_today_usd / b.budget_usd) : 100;
+    const cls = pct >= 100 ? 'over' : pct >= 80 ? 'warn' : '';
+    return `<tr><td>${esc(b.team)}</td><td class="n">${usd(b.spent_today_usd)}</td><td class="n">${usd(b.budget_usd)}</td>
+      <td><div class="bar"><div class="fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div></td></tr>`;
+  }).join('');
+  return `<h2>Daily budgets (UTC)</h2><table><tr><th>Team</th><th>Spent today</th><th>Budget</th><th>Used</th></tr>${body}</table>`;
+}
 async function load() {
-  const s = await (await fetch('/stats')).json();
+  const res = await fetch('/stats');
+  if (!res.ok) return;
+  const s = await res.json();
   const t = s.totals;
   const hitRate = t.calls ? Math.round(100 * t.cache_hits / t.calls) + '%' : '0%';
   document.getElementById('tiles').innerHTML =
@@ -52,7 +70,7 @@ async function load() {
     tile('Routed calls', num(t.routed_calls)) +
     tile('Avg latency', t.avg_latency_ms + ' ms') +
     (t.unpriced_calls ? tile('Calls with no price set', num(t.unpriced_calls), 'warn') : '');
-  document.getElementById('tables').innerHTML =
+  document.getElementById('tables').innerHTML = budgets(s.budgets) +
     table('By team', s.by_team) + table('By feature', s.by_feature) + table('By model', s.by_model);
 }
 load(); setInterval(load, 10000);
