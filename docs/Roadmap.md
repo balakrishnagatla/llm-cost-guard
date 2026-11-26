@@ -32,5 +32,4 @@ Ordered by expected savings, based on what the [test results](Results.md) showed
 
 ## Platform
 
-- Postgres option for multi-instance deployments
-- Helm chart for Kubernetes
+Production deployment (Helm chart for Kubernetes, Postgres and Redis for multiple replicas, cloud infrastructure as code) is developed in a companion repository: [llm-cost-guard-platform](https://github.com/balakrishnagatla/llm-cost-guard-platform). This repository stays the reference implementation and local prototype.

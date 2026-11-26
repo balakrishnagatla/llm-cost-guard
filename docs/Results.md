@@ -36,6 +36,38 @@ What this means for cost control:
 2. **Control reasoning effort.** Simple tasks should run with low reasoning effort and an output cap. See [Roadmap](Roadmap.md).
 3. **Routing pays off twice.** The cheap model is cheaper per token *and* tends to think less on simple prompts.
 
+## Reasoning control: before and after (v0.4)
+
+Same prompt ("Say hello in five words"), same model (`openai/gpt-oss-20b`), real Groq calls:
+
+| | Before (v0.3) | After (v0.4, `reasoning_effort: low`) | Change |
+|---|---|---|---|
+| Output tokens | 227 | 63 | **72% fewer** |
+| Cost per call | $0.000074 | $0.000025 | **66% cheaper** |
+
+The live smoke test in CI now checks that this stays true on every merge.
+
+## Real traffic: 88 calls, 12 teams (v0.5)
+
+Realistic traffic from 12 teams and 13 features (support, search, analytics, engineering, marketing, sales, finance, legal, HR, product, data) through Groq's free tier:
+
+| Metric | Value |
+|---|---|
+| Calls | 88 (20 answered from cache) |
+| Spend | $0.0193 |
+| Avoided by cache and routing | $0.0097 (**34% savings rate**) |
+| Sent to the strong model | 15% of routed calls |
+| Cost per 1,000 tokens | $0.00043 |
+| Latency (p50 / p95) | 0.49 s / 6.6 s |
+
+What stood out:
+
+- **A few features drive most of the cost.** An `analyze` call averaged $0.0018 and a `copy` call $0.000016, about **110 times** more. Cost per feature is the number to watch, not cost per team.
+- **Strong-model calls are slow as well as expensive.** The p95 latency of 6.6 s comes almost entirely from the strong model producing 1,700 to 3,000 output tokens.
+- **Caching pays off on repetitive features.** Support classification and HR policy questions had the highest cache hit rates.
+
+![Insights](images/dashboard-insights.png)
+
 ## Security test
 
 The gateway was also run with all protections on and probed like an outsider would:
