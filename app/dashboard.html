@@ -39,11 +39,11 @@ function tile(label, value, cls = '') {
 function table(title, rows) {
   if (!rows.length) return '';
   const body = rows.map(r => `<tr><td>${esc(r.name)}</td><td class="n">${num(r.calls)}</td>
-    <td class="n">${num(r.input_tokens)}</td><td class="n">${num(r.output_tokens)}</td>
+    <td class="n">${num(r.input_tokens)}</td><td class="n">${num(r.output_tokens)}</td><td class="n">${num(r.reasoning_tokens)}</td>
     <td class="n">${usd(r.cost_usd)}</td><td class="n">${usd(r.saved_usd)}</td>
     <td class="n">${usd(r.routing_saved_usd)}</td></tr>`).join('');
   return `<h2>${esc(title)}</h2><table><tr><th>Name</th><th>Calls</th><th>Input tokens</th>
-    <th>Output tokens</th><th>Cost</th><th>Saved by cache</th><th>Saved by routing</th></tr>${body}</table>`;
+    <th>Output tokens</th><th>Reasoning tokens</th><th>Cost</th><th>Saved by cache</th><th>Saved by routing</th></tr>${body}</table>`;
 }
 function budgets(rows) {
   if (!rows || !rows.length) return '';
@@ -67,7 +67,9 @@ async function load() {
     tile('Saved by routing (est.)', usd(t.routing_saved_usd), 'saved') +
     tile('Calls', num(t.calls)) +
     tile('Cache hit rate', hitRate) +
+    tile('Reasoning share of output', t.output_tokens ? Math.round(100 * t.reasoning_tokens / t.output_tokens) + '%' : '0%') +
     tile('Routed calls', num(t.routed_calls)) +
+    (t.fallback_calls ? tile('Failover calls', num(t.fallback_calls), 'warn') : '') +
     tile('Avg latency', t.avg_latency_ms + ' ms') +
     (t.unpriced_calls ? tile('Calls with no price set', num(t.unpriced_calls), 'warn') : '');
   document.getElementById('tables').innerHTML = budgets(s.budgets) +

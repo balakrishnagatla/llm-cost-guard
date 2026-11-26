@@ -18,7 +18,7 @@ def load_prices() -> dict:
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
-def find_price(model: str):
+def find_price(model: str) -> dict | None:
     prices = load_prices()
     if model in prices:
         return prices[model]
@@ -37,3 +37,8 @@ def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
 
 def is_priced(model: str) -> bool:
     return find_price(model) is not None
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count (about 4 characters per token) for estimates before a call."""
+    return max(1, len(text) // 4) if text else 0

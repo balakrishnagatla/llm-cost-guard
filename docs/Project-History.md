@@ -34,7 +34,20 @@ First real test against Groq: routing, caching and cost tracking all worked, and
 - Dependabot, branch protection, secret scanning, private vulnerability reporting
 - Dependencies updated (FastAPI, Uvicorn, HTTPX, pytest, GitHub Actions)
 
+## v0.4: Cut reasoning cost, stay up
+
+**Goal:** act on the test finding that reasoning tokens dominate cost, and keep working when a provider fails.
+
+- **Reasoning control:** the cheap tier is sent `reasoning_effort: low` and an output cap; reasoning tokens are tracked per call, team and model (estimated from reasoning text when the provider reports 0)
+- **Pre-call cost estimates:** budgets stop a call before it overspends, not after
+- **Failover:** retries on backup providers (for example Groq to Gemini) on rate limits, server errors and outages
+- **Live smoke test** against the real Groq API, using a GitHub environment secret
+- Defaults now target Groq's free tier, so the project runs at no cost out of the box
+- MIT license, dashboard screenshot, lint and type checks, coverage floor, Docker named volume
+
 ## Quality bar
 
-- 17 automated tests, including 10 security tests
+- 31 automated tests (security, routing, reasoning control, budgets, failover, streaming); 92% coverage
+- Lint, type checks, dependency audit and static security scan on every pull request
+- Live test against the real provider on every merge to `main`
 - End-to-end test with every protection enabled, probing the gateway as an attacker would

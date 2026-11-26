@@ -40,7 +40,9 @@ def init_db() -> None:
                 priced INTEGER NOT NULL,
                 requested_model TEXT NOT NULL DEFAULT '',
                 routing_saved_usd REAL NOT NULL DEFAULT 0,
-                streamed INTEGER NOT NULL DEFAULT 0
+                streamed INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                upstream TEXT NOT NULL DEFAULT 'primary'
             );
             CREATE TABLE IF NOT EXISTS cache (
                 key TEXT PRIMARY KEY,
@@ -55,6 +57,8 @@ def init_db() -> None:
             ("requested_model", "TEXT NOT NULL DEFAULT ''"),
             ("routing_saved_usd", "REAL NOT NULL DEFAULT 0"),
             ("streamed", "INTEGER NOT NULL DEFAULT 0"),
+            ("reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("upstream", "TEXT NOT NULL DEFAULT 'primary'"),
         ]:
             if col not in existing:
                 _db().execute(f"ALTER TABLE calls ADD COLUMN {col} {ddl}")
@@ -84,7 +88,7 @@ def spent_today_by_team() -> dict:
 CALL_COLUMNS = frozenset({
     "ts", "provider", "model", "team", "feature", "input_tokens", "output_tokens", "cost_usd",
     "saved_usd", "latency_ms", "cache_hit", "status", "priced", "requested_model",
-    "routing_saved_usd", "streamed",
+    "routing_saved_usd", "streamed", "reasoning_tokens", "upstream",
 })
 GROUP_COLUMNS = frozenset({"team", "feature", "model"})
 
@@ -127,6 +131,7 @@ def stats() -> dict:
             rows = _db().execute(
                 f"""SELECT {col} AS name, COUNT(*) AS calls,
                            SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                           SUM(reasoning_tokens) AS reasoning_tokens,
                            ROUND(SUM(cost_usd), 6) AS cost_usd, ROUND(SUM(saved_usd), 6) AS saved_usd,
                            ROUND(SUM(routing_saved_usd), 6) AS routing_saved_usd
                     FROM calls GROUP BY {col} ORDER BY cost_usd DESC"""  # nosec B608
@@ -142,6 +147,9 @@ def stats() -> dict:
                       ROUND(COALESCE(SUM(routing_saved_usd), 0), 6) AS routing_saved_usd,
                       COALESCE(SUM(CASE WHEN requested_model = 'auto' THEN 1 ELSE 0 END), 0) AS routed_calls,
                       COALESCE(SUM(streamed), 0) AS streamed_calls,
+                      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                      COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                      COALESCE(SUM(CASE WHEN upstream != 'primary' THEN 1 ELSE 0 END), 0) AS fallback_calls,
                       ROUND(COALESCE(AVG(latency_ms), 0), 1) AS avg_latency_ms,
                       COALESCE(SUM(CASE WHEN priced = 0 THEN 1 ELSE 0 END), 0) AS unpriced_calls
                FROM calls"""

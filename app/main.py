@@ -1,41 +1,51 @@
-"""LLM Cost Guard: a proxy that logs cost per team/feature, caches repeat calls,
-and routes simple prompts to cheaper models.
+"""LLM Cost Guard: a gateway that measures what every LLM call costs and cuts it.
 
-Point your app at this proxy instead of the provider:
+Point your app at this gateway instead of the provider:
   OpenAI-compatible:  POST http://localhost:8080/openai/v1/chat/completions
   Anthropic:          POST http://localhost:8080/anthropic/v1/messages
-Tag calls with headers:  X-Team: search   X-Feature: summarize
-Set "model": "auto" to let the proxy pick a cheap or strong model.
+Set "model": "auto" to let the gateway pick a cheap or strong model.
 """
 import codecs
+import contextlib
 import hashlib
 import json
+import logging
 import os
 import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
-
-import logging
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
-from . import db
-from .pricing import cost_usd, is_priced
-from .router import route
-from .security import (clean_label, credential_fingerprint, parse_budgets, proxy_keys,
-                       require_dashboard_login, resolve_team)
+from . import __version__, db
+from .pricing import cost_usd, estimate_tokens, is_priced
+from .router import Route, fallbacks_for, prompt_text, route
+from .security import (
+    clean_label,
+    credential_fingerprint,
+    parse_budgets,
+    proxy_keys,
+    require_dashboard_login,
+    resolve_team,
+)
 
 log = logging.getLogger("cost_guard")
 
-OPENAI_BASE = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_BASE = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
 ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
 # deterministic = cache only temperature 0 calls; all = cache everything; off = no cache
 CACHE_MODE = os.getenv("CACHE_MODE", "deterministic").lower()
 CACHE_TTL_SECONDS = float(os.getenv("CACHE_TTL_SECONDS", "86400"))
 UPSTREAM_TIMEOUT = float(os.getenv("UPSTREAM_TIMEOUT", "120"))
 MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(1_000_000)))
+# Output tokens assumed for the pre-call budget check when the request sets no limit
+DEFAULT_OUTPUT_ESTIMATE = int(os.getenv("DEFAULT_OUTPUT_ESTIMATE", "1024"))
+# Upstream answers that make the gateway try the next fallback provider
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 @asynccontextmanager
@@ -45,7 +55,7 @@ async def lifespan(app: FastAPI):
     keys = proxy_keys()
     app.state.budgets = parse_budgets(os.getenv("BUDGETS", ""))
     if not keys:
-        log.warning("COST_GUARD_KEYS is not set: proxy is in open dev mode. Keep it on localhost.")
+        log.warning("COST_GUARD_KEYS is not set: gateway is in open dev mode. Keep it on localhost.")
     if not os.getenv("DASHBOARD_PASSWORD"):
         log.warning("DASHBOARD_PASSWORD is not set: dashboard and /stats are not password protected.")
     app.state.client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
@@ -53,7 +63,8 @@ async def lifespan(app: FastAPI):
     await app.state.client.aclose()
 
 
-app = FastAPI(title="LLM Cost Guard", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="LLM Cost Guard", version=__version__, lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.middleware("http")
@@ -64,44 +75,79 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "frame-ancestors 'none'")
     return response
 
 
-# ---------- provider-specific usage parsing ----------
+# ---------- token usage ----------
 
-def _openai_usage(data: dict):
+@dataclass
+class Usage:
+    input: int = 0
+    output: int = 0
+    reasoning: int = 0  # part of output; reported by the provider or estimated from reasoning text
+    reasoning_chars: int = 0
+
+
+def _reasoning_text_tokens(chars: int) -> int:
+    return estimate_tokens("x" * chars) if chars else 0
+
+
+def _openai_usage(data: dict) -> Usage:
     u = data.get("usage") or {}
-    return int(u.get("prompt_tokens", 0)), int(u.get("completion_tokens", 0))
+    usage = Usage(int(u.get("prompt_tokens", 0)), int(u.get("completion_tokens", 0)))
+    details = u.get("completion_tokens_details") or {}
+    usage.reasoning = int(details.get("reasoning_tokens") or u.get("reasoning_tokens") or 0)
+    if not usage.reasoning:
+        # Some providers (e.g. Groq) return the reasoning text but report 0 reasoning tokens.
+        chars = sum(len((c.get("message") or {}).get("reasoning") or "") for c in data.get("choices", []))
+        usage.reasoning = min(_reasoning_text_tokens(chars), usage.output)
+    return usage
 
 
-def _anthropic_usage(data: dict):
+def _anthropic_usage(data: dict) -> Usage:
     u = data.get("usage") or {}
-    return int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
+    usage = Usage(int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0)))
+    chars = sum(len(b.get("thinking", "")) for b in data.get("content", []) if b.get("type") == "thinking")
+    usage.reasoning = min(_reasoning_text_tokens(chars), usage.output)
+    return usage
 
 
-def _openai_stream_event(event: dict, usage: dict) -> None:
-    # OpenAI sends usage in the last chunk when stream_options.include_usage is set;
-    # Groq puts it under x_groq.usage.
+def _openai_stream_event(event: dict, usage: Usage) -> None:
+    for choice in event.get("choices") or []:
+        usage.reasoning_chars += len((choice.get("delta") or {}).get("reasoning") or "")
+    # Usage arrives in the last chunk (OpenAI with include_usage) or under x_groq.usage (Groq).
     u = event.get("usage") or (event.get("x_groq") or {}).get("usage")
     if u:
-        usage["in"] = int(u.get("prompt_tokens", usage["in"]))
-        usage["out"] = int(u.get("completion_tokens", usage["out"]))
+        usage.input = int(u.get("prompt_tokens", usage.input))
+        usage.output = int(u.get("completion_tokens", usage.output))
+        details = u.get("completion_tokens_details") or {}
+        usage.reasoning = int(details.get("reasoning_tokens") or usage.reasoning)
 
 
-def _anthropic_stream_event(event: dict, usage: dict) -> None:
-    if event.get("type") == "message_start":
+def _anthropic_stream_event(event: dict, usage: Usage) -> None:
+    kind = event.get("type")
+    if kind == "message_start":
         u = (event.get("message") or {}).get("usage") or {}
-        usage["in"] = int(u.get("input_tokens", 0))
-        usage["out"] = int(u.get("output_tokens", 0))
-    elif event.get("type") == "message_delta":
-        u = event.get("usage") or {}
-        usage["out"] = int(u.get("output_tokens", usage["out"]))  # cumulative
+        usage.input = int(u.get("input_tokens", 0))
+        usage.output = int(u.get("output_tokens", 0))
+    elif kind == "message_delta":
+        usage.output = int((event.get("usage") or {}).get("output_tokens", usage.output))  # cumulative
+    elif kind == "content_block_delta":
+        usage.reasoning_chars += len((event.get("delta") or {}).get("thinking") or "")
+
+
+@dataclass
+class Provider:
+    name: str
+    usage: Callable[[dict], Usage]
+    stream_event: Callable[[dict, Usage], None]
 
 
 PROVIDERS = {
-    "openai": {"usage": _openai_usage, "stream_event": _openai_stream_event},
-    "anthropic": {"usage": _anthropic_usage, "stream_event": _anthropic_stream_event},
+    "openai": Provider("openai", _openai_usage, _openai_stream_event),
+    "anthropic": Provider("anthropic", _anthropic_usage, _anthropic_stream_event),
 }
 
 
@@ -115,29 +161,79 @@ def _cacheable(body: dict) -> bool:
     return body.get("temperature") == 0
 
 
-def _costs(model: str, baseline: str | None, in_t: int, out_t: int):
-    cost = cost_usd(model, in_t, out_t)
+def _costs(model: str, baseline: str | None, usage: Usage) -> tuple[float, float]:
+    cost = cost_usd(model, usage.input, usage.output)
     routing_saved = 0.0
     if baseline and baseline != model:
         # Estimate: what the same tokens would have cost on the strong model.
-        routing_saved = max(cost_usd(baseline, in_t, out_t) - cost, 0.0)
+        routing_saved = max(cost_usd(baseline, usage.input, usage.output) - cost, 0.0)
     return cost, routing_saved
 
 
-def _guard_headers(model: str, reason: str | None, cache: str, cost: float | None = None) -> dict:
-    h = {"x-cost-guard-model": model, "x-cost-guard-cache": cache}
-    if reason:
-        h["x-cost-guard-route-reason"] = reason
+def estimate_call_cost(model: str, body: dict) -> float:
+    """Upper-bound-ish cost of a call before it's sent, for the budget check."""
+    in_t = estimate_tokens(prompt_text(body))
+    out_t = int(body.get("max_completion_tokens") or body.get("max_tokens") or DEFAULT_OUTPUT_ESTIMATE)
+    return cost_usd(model, in_t, out_t)
+
+
+def _guard_headers(rt: Route, cache: str, upstream: str, cost: float | None = None,
+                   estimate: float | None = None) -> dict[str, str]:
+    h = {"x-cost-guard-model": rt.model, "x-cost-guard-cache": cache, "x-cost-guard-upstream": upstream}
+    if rt.reason:
+        h["x-cost-guard-route-reason"] = rt.reason
     if cost is not None:
         h["x-cost-guard-cost-usd"] = f"{cost:.6f}"
+    if estimate is not None:
+        h["x-cost-guard-estimate-usd"] = f"{estimate:.6f}"
     return h
 
 
-# ---------- core proxy ----------
+@dataclass
+class Attempt:
+    name: str
+    url: str
+    headers: dict
+    body: dict
 
-async def _proxy(request: Request, provider: str, url: str, headers: dict) -> Response:
-    team = resolve_team(request)  # 401 if a key is required and missing
 
+def _attempts(provider: str, url: str, headers: dict, body: dict) -> list[Attempt]:
+    attempts = [Attempt("primary", url, headers, body)]
+    for fb in fallbacks_for(provider):
+        key = os.getenv(fb.get("api_key_env", ""), "")
+        models = fb.get("models") or {}
+        model = models.get(body.get("model")) or models.get("*")
+        if not key or not model:
+            continue  # not configured on this machine
+        fb_body = {k: v for k, v in body.items() if k not in set(fb.get("drop_params", []))}
+        fb_body["model"] = model
+        attempts.append(Attempt(clean_label(fb.get("name"), "fallback"),
+                                fb["base_url"].rstrip("/") + "/chat/completions",
+                                {"Authorization": f"Bearer {key}"}, fb_body))
+    return attempts
+
+
+async def _send(client: httpx.AsyncClient, attempts: list[Attempt], stream: bool) -> tuple[Attempt, httpx.Response]:
+    """Try each upstream in order; move on when one is rate-limited, failing or unreachable."""
+    last_error: Exception | None = None
+    for i, a in enumerate(attempts):
+        is_last = i == len(attempts) - 1
+        try:
+            resp = await client.send(client.build_request("POST", a.url, json=a.body, headers=a.headers),
+                                     stream=stream)
+        except httpx.HTTPError as e:
+            last_error = e
+            log.warning("Upstream %s unreachable: %s", a.name, e)
+            continue
+        if resp.status_code in RETRYABLE_STATUS and not is_last:
+            log.warning("Upstream %s returned %s, trying next", a.name, resp.status_code)
+            await resp.aclose()
+            continue
+        return a, resp
+    raise HTTPException(502, f"All upstreams failed: {last_error}")
+
+
+async def _read_json(request: Request) -> dict:
     if int(request.headers.get("content-length") or 0) > MAX_BODY_BYTES:
         raise HTTPException(413, "Request body too large")
     raw = await request.body()
@@ -149,93 +245,100 @@ async def _proxy(request: Request, provider: str, url: str, headers: dict) -> Re
         raise HTTPException(400, "Request body must be JSON")
     if not isinstance(body, dict):
         raise HTTPException(400, "Request body must be a JSON object")
+    return body
 
-    budget = request.app.state.budgets.get(team)
-    if budget is not None:
-        spent = db.spent_today(team)
-        if spent >= budget:
-            raise HTTPException(429, f"Daily budget for team '{team}' reached (${spent:.6g} of ${budget:.6g}). "
-                                     "Resets at 00:00 UTC.")
+
+# ---------- core ----------
+
+async def _proxy(request: Request, provider_name: str, url: str, headers: dict) -> Response:
+    team = resolve_team(request)  # 401 if a key is required and missing
+    body = await _read_json(request)
+    provider = PROVIDERS[provider_name]
 
     requested = body.get("model", "unknown")
     try:
-        model, baseline, reason = route(provider, body)
+        rt = route(provider_name, body)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    body["model"] = model
+    body["model"] = rt.model
+    for k, v in rt.params.items():  # tier defaults; the caller's own settings win
+        body.setdefault(k, v)
 
-    meta = dict(
-        provider=provider, model=model, requested_model=requested,
-        team=team,
-        feature=clean_label(request.headers.get("x-feature")),
-        priced=int(is_priced(model)),
-    )
-    funcs = PROVIDERS[provider]
+    estimate = estimate_call_cost(rt.model, body)
+    budget = request.app.state.budgets.get(team)
+    if budget is not None:
+        spent = db.spent_today(team)
+        if spent + estimate > budget:
+            raise HTTPException(429, f"Daily budget for team '{team}' would be exceeded "
+                                     f"(spent ${spent:.6g}, this call up to ${estimate:.6g}, budget ${budget:.6g}). "
+                                     "Resets at 00:00 UTC.")
+
+    meta = {"provider": provider_name, "requested_model": requested, "team": team,
+            "feature": clean_label(request.headers.get("x-feature"))}
     start = time.perf_counter()
 
     if body.get("stream"):
-        return await _proxy_stream(request, provider, url, headers, body, meta, baseline, reason, start)
+        return await _proxy_stream(request, provider, url, headers, body, rt, meta, start, estimate)
 
     # Cache entries are scoped to the upstream credential so answers never leak across API keys.
     key = hashlib.sha256(
-        (provider + credential_fingerprint(headers) + json.dumps(body, sort_keys=True)).encode()).hexdigest()
+        (provider_name + credential_fingerprint(headers) + json.dumps(body, sort_keys=True)).encode()).hexdigest()
     if _cacheable(body):
         cached = db.get_cached(key, CACHE_TTL_SECONDS)
         if cached is not None:
-            in_t, out_t = funcs["usage"](cached)
-            db.log_call(**meta, input_tokens=in_t, output_tokens=out_t, cost_usd=0.0,
-                        saved_usd=cost_usd(model, in_t, out_t), routing_saved_usd=0.0,
+            u = provider.usage(cached)
+            db.log_call(**meta, model=rt.model, priced=int(is_priced(rt.model)), input_tokens=u.input,
+                        output_tokens=u.output, reasoning_tokens=u.reasoning, cost_usd=0.0,
+                        saved_usd=cost_usd(rt.model, u.input, u.output), routing_saved_usd=0.0,
                         latency_ms=(time.perf_counter() - start) * 1000, cache_hit=1, status=200)
-            return JSONResponse(cached, headers=_guard_headers(model, reason, "hit", 0.0))
+            return JSONResponse(cached, headers=_guard_headers(rt, "hit", "cache", 0.0, estimate))
 
-    try:
-        resp = await request.app.state.client.post(url, json=body, headers=headers)
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Upstream request failed: {e}")
+    attempt, resp = await _send(request.app.state.client, _attempts(provider_name, url, headers, body), False)
     latency = (time.perf_counter() - start) * 1000
     try:
         data = resp.json()
     except ValueError:
         data = {"error": resp.text}
 
-    in_t = out_t = 0
-    cost = routing_saved = 0.0
+    used_model = attempt.body["model"]
+    usage, cost, routing_saved = Usage(), 0.0, 0.0
     if resp.status_code == 200:
-        in_t, out_t = funcs["usage"](data)
-        cost, routing_saved = _costs(model, baseline, in_t, out_t)
-        if _cacheable(body):
+        usage = provider.usage(data)
+        cost, routing_saved = _costs(used_model, rt.baseline, usage)
+        if _cacheable(body) and attempt.name == "primary":
             db.put_cache(key, data)
 
-    db.log_call(**meta, input_tokens=in_t, output_tokens=out_t, cost_usd=cost, saved_usd=0.0,
-                routing_saved_usd=routing_saved, latency_ms=latency, cache_hit=0, status=resp.status_code)
+    db.log_call(**meta, model=used_model, priced=int(is_priced(used_model)), input_tokens=usage.input,
+                output_tokens=usage.output, reasoning_tokens=usage.reasoning, cost_usd=cost, saved_usd=0.0,
+                routing_saved_usd=routing_saved, latency_ms=latency, cache_hit=0, status=resp.status_code,
+                upstream=attempt.name)
+    out_rt = Route(model=used_model, reason=rt.reason)
     return JSONResponse(data, status_code=resp.status_code,
-                        headers=_guard_headers(model, reason, "miss", cost))
+                        headers=_guard_headers(out_rt, "miss", attempt.name, cost, estimate))
 
 
-async def _proxy_stream(request, provider, url, headers, body, meta, baseline, reason, start) -> Response:
-    if provider == "openai":
+async def _proxy_stream(request: Request, provider: Provider, url: str, headers: dict, body: dict,
+                        rt: Route, meta: dict, start: float, estimate: float) -> Response:
+    if provider.name == "openai":
         # Ask for token usage in the final chunk so we can price the call.
         body.setdefault("stream_options", {"include_usage": True})
 
-    client: httpx.AsyncClient = request.app.state.client
-    try:
-        resp = await client.send(client.build_request("POST", url, json=body, headers=headers), stream=True)
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Upstream request failed: {e}")
+    attempt, resp = await _send(request.app.state.client, _attempts(provider.name, url, headers, body), True)
+    used_model = attempt.body["model"]
+    log_base = dict(**meta, model=used_model, priced=int(is_priced(used_model)), upstream=attempt.name, streamed=1)
 
     if resp.status_code != 200:
         content = await resp.aread()
         await resp.aclose()
-        db.log_call(**meta, input_tokens=0, output_tokens=0, cost_usd=0.0, saved_usd=0.0,
+        db.log_call(**log_base, input_tokens=0, output_tokens=0, cost_usd=0.0, saved_usd=0.0,
                     routing_saved_usd=0.0, latency_ms=(time.perf_counter() - start) * 1000,
-                    cache_hit=0, status=resp.status_code, streamed=1)
+                    cache_hit=0, status=resp.status_code)
         return Response(content, status_code=resp.status_code,
                         media_type=resp.headers.get("content-type", "application/json"))
 
-    on_event = PROVIDERS[provider]["stream_event"]
-    usage = {"in": 0, "out": 0}
+    usage = Usage()
 
-    async def relay():
+    async def relay() -> AsyncIterator[bytes]:
         decoder = codecs.getincrementaldecoder("utf-8")()
         buf = ""
         try:
@@ -248,20 +351,21 @@ async def _proxy_stream(request, provider, url, headers, body, meta, baseline, r
                     if line.startswith("data:"):
                         payload = line[5:].strip()
                         if payload and payload != "[DONE]":
-                            try:
-                                on_event(json.loads(payload), usage)
-                            except (json.JSONDecodeError, AttributeError):
-                                pass
+                            with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
+                                provider.stream_event(json.loads(payload), usage)
         finally:
             await resp.aclose()
-            cost, routing_saved = _costs(meta["model"], baseline, usage["in"], usage["out"])
-            db.log_call(**meta, input_tokens=usage["in"], output_tokens=usage["out"], cost_usd=cost,
-                        saved_usd=0.0, routing_saved_usd=routing_saved,
-                        latency_ms=(time.perf_counter() - start) * 1000,
-                        cache_hit=0, status=200, streamed=1)
+            if not usage.reasoning:
+                usage.reasoning = min(_reasoning_text_tokens(usage.reasoning_chars), usage.output)
+            cost, routing_saved = _costs(used_model, rt.baseline, usage)
+            db.log_call(**log_base, input_tokens=usage.input, output_tokens=usage.output,
+                        reasoning_tokens=usage.reasoning, cost_usd=cost, saved_usd=0.0,
+                        routing_saved_usd=routing_saved, latency_ms=(time.perf_counter() - start) * 1000,
+                        cache_hit=0, status=200)
 
+    out_rt = Route(model=used_model, reason=rt.reason)
     return StreamingResponse(relay(), media_type="text/event-stream",
-                             headers=_guard_headers(meta["model"], reason, "bypass"))
+                             headers=_guard_headers(out_rt, "bypass", attempt.name, estimate=estimate))
 
 
 # ---------- routes ----------
@@ -275,8 +379,8 @@ async def openai_chat(request: Request):
 @app.post("/anthropic/v1/messages")
 async def anthropic_messages(request: Request):
     headers = {
-        "x-api-key": request.headers.get("x-api-key") or os.getenv("ANTHROPIC_API_KEY", ""),
-        "anthropic-version": request.headers.get("anthropic-version", "2023-06-01"),
+        "x-api-key": request.headers.get("x-api-key") or os.environ.get("ANTHROPIC_API_KEY") or "",
+        "anthropic-version": request.headers.get("anthropic-version") or "2023-06-01",
     }
     return await _proxy(request, "anthropic", f"{ANTHROPIC_BASE}/v1/messages", headers)
 
@@ -294,7 +398,7 @@ def get_stats(request: Request):
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "version": __version__}
 
 
 @app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_dashboard_login)])

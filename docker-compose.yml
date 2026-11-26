@@ -7,7 +7,8 @@ services:
       - "127.0.0.1:8080:8080"
     env_file: .env
     volumes:
-      - ./data:/srv/data
+      # Named volume: works on Linux and macOS without host permission fixes
+      - costguard-data:/srv/data
       - ./pricing.json:/srv/pricing.json:ro
       - ./routing.json:/srv/routing.json:ro
     security_opt:
@@ -15,3 +16,6 @@ services:
     cap_drop:
       - ALL
     restart: unless-stopped
+
+volumes:
+  costguard-data:
